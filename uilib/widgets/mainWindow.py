@@ -34,6 +34,7 @@ class Window(QMainWindow):
         self.app.fileManager.fileNameChanged.connect(self.updateWindowTitle)
         self.app.fileManager.newMotor.connect(self.resetOutput)
         self.app.fileManager.newMotor.connect(self.getQuickResults)
+        self.app.fileManager.recentFileLoaded.connect(self.motorImported)
 
         self.app.importExportManager.motorImported.connect(self.motorImported)
 
@@ -88,6 +89,7 @@ class Window(QMainWindow):
         self.ui.actionOpen.triggered.connect(lambda x: self.loadMotor(None))
 
         self.app.importExportManager.createMenus(self.ui.menuImport, self.ui.menuExport)
+        self.app.fileManager.createRecentlyOpenedMenu(self.ui.menuOpen_Recent)
 
         self.ui.actionQuit.triggered.connect(self.closeEvent)
 
