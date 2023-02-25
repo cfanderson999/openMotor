@@ -1,17 +1,23 @@
-from PyQt6.QtCore import QObject
+from PyQt6.QtCore import QObject, pyqtSignal
 from PyQt6.QtWidgets import QFileDialog, QMessageBox
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtGui import QAction
 
+import os
 import motorlib
 
-from .fileIO import saveFile, loadFile, fileTypes
+from .fileIO import saveFile, loadFile, fileTypes, getConfigPath
 from .helpers import FLAGS_NO_ICON, excludeKeys
 from .logger import logger
 
 class FileManager(QObject):
 
+    MAX_RECENT_FILES = 5
+
     fileNameChanged = pyqtSignal(str, bool)
     newMotor = pyqtSignal(object)
+    # TODO: eventually a signal like this that makes the mainWindow repopulate the propellant editor should
+    # be emitted whenever load() is called
+    recentFileLoaded = pyqtSignal()
 
     def __init__(self, app):
         super().__init__()
@@ -24,6 +30,9 @@ class FileManager(QObject):
         self.fileName = None
 
         self.newFile()
+
+        self.recentlyOpenedFiles = []
+        self.recentFilesPath = os.path.join(getConfigPath(), 'recent_files.yaml')
 
     # Check if current motor is unsaved and start over from default motor. Called when the menu item is triggered.
     def newFile(self):
@@ -67,6 +76,7 @@ class FileManager(QObject):
         if fileName is not None:
             self.fileName = fileName
             self.save()
+            self.addRecentFile(fileName)
 
     # Checks for unsaved changes, asks for a filename, and loads the file
     def load(self, path=None):
@@ -80,6 +90,7 @@ class FileManager(QObject):
                         motor = motorlib.motor.Motor()
                         motor.applyDict(res)
                         self.startFromMotor(motor, path)
+                        self.addRecentFile(path)
                         return True
                 except Exception as exc:
                     self.app.outputException(exc, "An error occurred while loading the file: ")
@@ -233,3 +244,44 @@ class FileManager(QObject):
                                'New propellant added')
 
         return motor
+
+    def createRecentlyOpenedMenu(self, recentlyOpenedMenu):
+        self.recentlyOpenedMenu = recentlyOpenedMenu
+
+        try:
+            self.recentFilesList = loadFile(self.recentFilesPath, fileTypes.RECENT_FILES)['recentFilesList']
+        except FileNotFoundError:
+            logger.warn('Unable to load recent files, creating new file at {}'.format(self.recentFilesPath))
+            self.recentFilesList = []
+            saveFile(self.recentFilesPath, {'recentFilesList': self.recentFilesList}, fileTypes.RECENT_FILES)
+
+        self.createRecentlyOpenedItems()
+
+    def createRecentlyOpenedItems(self):
+        self.recentlyOpenedMenu.clear()
+
+        if len(self.recentFilesList) == 0:
+            self.recentlyOpenedMenu.addAction(QAction('No Recent Files', self.recentlyOpenedMenu))
+            return
+
+        for filepath in self.recentFilesList:
+            _, filename = os.path.split(filepath)
+            action = QAction(filename, self.recentlyOpenedMenu)
+            action.triggered.connect(lambda _, path=filepath: self.loadRecentFile(path))
+            self.recentlyOpenedMenu.addAction(action)
+
+    def loadRecentFile(self, path):
+        self.load(path)
+        self.recentFileLoaded.emit()
+
+    def addRecentFile(self, filepath):
+        if filepath in self.recentFilesList:
+            self.recentFilesList.remove(filepath)
+
+        self.recentFilesList = [filepath] + self.recentFilesList
+
+        self.recentFilesList = self.recentFilesList[:FileManager.MAX_RECENT_FILES]
+
+        saveFile(self.recentFilesPath, {'recentFilesList': self.recentFilesList}, fileTypes.RECENT_FILES)
+
+        self.createRecentlyOpenedItems()
