@@ -17,6 +17,8 @@ class PropertyEditor(QWidget):
         super(PropertyEditor, self).__init__(QWidget(parent))
         self.preferences = preferences
         self.setLayout(QVBoxLayout())
+        self.layout().setSpacing(0)
+        self.layout().setContentsMargins(5, 5, 5, 5)
         self.prop = prop
 
         if self.preferences is not None:
