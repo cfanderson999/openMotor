@@ -15,6 +15,9 @@ class NozzlePreviewWidget(QWidget):
 
         self.brush = QBrush()
 
+        if QApplication.instance() and QApplication.instance().isDarkMode():
+            self.brush.setColor(Qt.GlobalColor.lightGray)
+
         self.brush.setStyle(Qt.BrushStyle.SolidPattern)
         self.scene = QGraphicsScene(self)
         self.upper = QGraphicsPolygonItem()
