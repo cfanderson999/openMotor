@@ -291,7 +291,7 @@ class Window(QMainWindow):
         return '{:.2f} {}'.format(motorlib.units.convert(quantity, inUnit, convUnit), convUnit)
 
     def updateMotorStats(self, simResult):
-        self.ui.labelMotorDesignation.setText(simResult.getDesignation())
+        self.ui.labelMotorDesignation.setText('{} ({:.0%})'.format(simResult.getDesignation(), simResult.getImpulseClassPercentage()))
         self.ui.labelImpulse.setText(self.formatMotorStat(simResult.getImpulse(), 'Ns'))
         self.ui.labelDeliveredISP.setText(self.formatMotorStat(simResult.getISP(), 's'))
         self.ui.labelBurnTime.setText(self.formatMotorStat(simResult.getBurnTime(), 's'))

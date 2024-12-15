@@ -184,11 +184,20 @@ class SimulationResult():
         imp = self.getImpulse()
         if imp < 1.25: # This is to avoid a domain error finding log(0)
             return 'N/A'
-        return chr(int(math.log(imp/1.25, 2)) + 65) + str(int(self.getAverageForce()))
+        return chr(int(math.log(imp / 1.25, 2)) + 65) + str(int(self.getAverageForce()))
 
     def getFullDesignation(self):
         """Returns the full motor designation, which also includes the total impulse prepended on"""
         return '{:.0f}{}'.format(self.getImpulse(), self.getDesignation())
+
+    def getImpulseClassPercentage(self):
+        """Returns the percentage of the way between the minimum and maximum impulse for the impulse class that the
+        motor is"""
+        impulse = self.getImpulse()
+        if impulse < 1.25:  # This is to avoid a domain error finding log(0)
+            return 0
+        minClassImpulse = 1.25 * 2 ** int(math.log(impulse / 1.25, 2))
+        return (impulse - minClassImpulse) / minClassImpulse
 
     def getPeakMassFlux(self):
         """Returns the maximum mass flux observed at any grain end."""
