@@ -34,8 +34,9 @@ class PropellantManager(QObject):
     def savePropellants(self):
         propellants = [prop.getProperties() for prop in self.propellants]
         try:
-            logger.log('Saving propellants to "{}"'.format(getConfigPath() + 'propellants.yaml'))
-            saveFile(getConfigPath() + 'propellants.yaml', propellants, fileTypes.PROPELLANTS)
+            destinationPath = getConfigPath() + 'propellants.yaml'
+            logger.log('Saving propellants to "{}"'.format(destinationPath))
+            saveFile(destinationPath, propellants, fileTypes.PROPELLANTS)
         except:
             logger.warn('Unable to save propellants!')
 
