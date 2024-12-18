@@ -97,6 +97,18 @@ class App(QApplication):
             msg.setWindowTitle(title)
             msg.exec()
 
+    def promptYesNo(self, content, title='openMotor'):
+        if self.headless:
+            return input('{} (y/n): '.format(content)) == 'y'
+        else:
+            logger.log(content)
+            msg = QMessageBox()
+            msg.setWindowIcon(self.icon)
+            msg.setText(content)
+            msg.setWindowTitle(title)
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            return msg.exec() == QMessageBox.StandardButton.Yes
+
     def outputException(self, exception, text, title='openMotor - Error'):
         if self.headless:
             print(text + " " + str(exception))
