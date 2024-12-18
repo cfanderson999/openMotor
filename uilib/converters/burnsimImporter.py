@@ -53,7 +53,7 @@ def importPropellant(node):
 
 class BurnSimImporter(Importer):
     def __init__(self, manager):
-        super().__init__(manager, 'BurnSim Motor', 'Loads motor files for BurnSim 3.0', {'.bsx': 'BurnSim Files'})
+        super().__init__(manager, 'BurnSim File', 'Loads motor files for BurnSim 3.0', {'.bsx': 'BurnSim Files'})
 
     def doConversion(self, path):
         motor = motorlib.motor.Motor()

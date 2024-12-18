@@ -5,7 +5,7 @@ from PyQt6.QtCore import pyqtSignal
 import motorlib
 
 from .fileIO import saveFile, loadFile, fileTypes
-from .helpers import FLAGS_NO_ICON
+from .helpers import FLAGS_NO_ICON, excludeKeys
 from .logger import logger
 
 class FileManager(QObject):
@@ -189,27 +189,46 @@ class FileManager(QObject):
         if motor.propellant is None:
             return motor
 
+        propManager = self.app.propellantManager
         originalName = motor.propellant.getProperty('name')
         # If the motor has a propellant that we don't have, add it to our library
-        if originalName not in self.app.propellantManager.getNames():
+        if originalName not in propManager.getNames():
+            # Check if any propellants in the library have the same properties and offer to dedupe
+            for libraryPropellantName in propManager.getNames():
+                libraryProperties = excludeKeys(propManager.getPropellantByName(libraryPropellantName).getProperties(), ['name'])
+                motorProperties = excludeKeys(motor.propellant.getProperties(), ['name'])
+                if libraryProperties == motorProperties:
+                    message = 'The propellant from the loaded motor ("{}") was not in the library, but the properties match "{}" from the library. Should the loaded motor be updated to use this propellant?'
+                    shouldDeDupe = self.app.promptYesNo(message.format(motor.propellant.getProperty('name'), libraryPropellantName))
+                    if shouldDeDupe:
+                        motor.propellant.setProperty('name', libraryPropellantName)
+                        return motor
+
             self.app.outputMessage('The propellant from the loaded motor was not in the library, so it was added as "{}"'.format(originalName),
                                    'New propellant added')
-            self.app.propellantManager.propellants.append(motor.propellant)
-            self.app.propellantManager.savePropellants()
+            propManager.propellants.append(motor.propellant)
+            propManager.savePropellants()
             logger.log('Propellant from loaded motor added to library under original name "{}"'.format(originalName))
 
             return motor
 
-        # If a propellant by the name already exists, we need to check if they are the same and change the name if not
-        if motor.propellant.getProperties() == self.app.propellantManager.getPropellantByName(originalName).getProperties():
-            return motor
-
-        addedNumber = 1
-        while motor.propellant.getProperty('name') + ' (' + str(addedNumber) + ')' in self.app.propellantManager.getNames():
+        addedNumber = 0
+        name = originalName
+        while name in propManager.getNames():
+            existingProps = excludeKeys(propManager.getPropellantByName(name).getProperties(), ['name'])
+            motorProps = excludeKeys(motor.propellant.getProperties(), ['name'])
+            if existingProps == motorProps:
+                # If this isn't the first loop, we need to change the name to add the number
+                if addedNumber != 0:
+                    motor.propellant.setProperty('name', name)
+                    message = 'Propellant from loaded motor has the same name as one in the library ("{}"), but their properties do not match. It does match "{}", so it has been updated to that propellant.'.format(originalName, name)
+                    self.app.outputMessage(message)
+                return motor
             addedNumber += 1
-        motor.propellant.setProperty('name', originalName + ' (' + str(addedNumber) + ')')
-        self.app.propellantManager.propellants.append(motor.propellant)
-        self.app.propellantManager.savePropellants()
+            name = '{} ({})'.format(originalName, addedNumber)
+        motor.propellant.setProperty('name', '{} ({})'.format(originalName, addedNumber))
+        propManager.propellants.append(motor.propellant)
+        propManager.savePropellants()
         self.app.outputMessage('The propellant from the loaded motor matches an existing item in the library, but they have different properties. The propellant from the motor has been added to the library as "{}"'.format(motor.propellant.getProperty('name')),
                                'New propellant added')
 
