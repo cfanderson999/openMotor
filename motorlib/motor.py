@@ -175,7 +175,7 @@ class Motor():
         simRes.channels['exitPressure'].addData(0)
         simRes.channels['dThroat'].addData(0)
 
-        # Check port/throat ratio and add a warning if it is large enough
+        # Check port/throat ratio and add a warning if it is not large enough
         aftPort = self.grains[-1].getPortArea(0)
         if aftPort is not None:
             minAllowed = self.config.getProperty('minPortThroat')
@@ -281,3 +281,41 @@ class Motor():
                     break
 
         return simRes
+
+    def getQuickResults(self):
+        results = {
+            'volumeLoading': 0,
+            'initialKn': 0,
+            'propellantMass': 0,
+            'portRatio': 0,
+            'length': 0
+        }
+
+        simRes = SimulationResult(self)
+
+        density = self.propellant.getProperty('density') if self.propellant is not None else None
+        throatArea = self.nozzle.getThroatArea()
+        motorVolume = self.calcTotalVolume()
+
+        if motorVolume == 0:
+            return results
+
+        # Generate coremaps for perforated grains
+        for grain in self.grains:
+            for alert in grain.getGeometryErrors():
+                if alert.level == SimAlertLevel.ERROR:
+                    return results
+
+            grain.simulationSetup(self.config)
+
+        perGrainReg = [0 for grain in self.grains]
+
+        results['volumeLoading'] = 100 * (1 - (self.calcFreeVolume(perGrainReg) / motorVolume))
+        if throatArea != 0:
+            results['initialKn'] = self.calcKN(perGrainReg, 0)
+            results['portRatio'] = simRes.getPortRatio()
+        if density is not None:
+            results['propellantMass'] = sum([grain.getVolumeAtRegression(0) * density for grain in self.grains])
+        results['length'] = simRes.getPropellantLength()
+
+        return results
