@@ -231,7 +231,7 @@ class SimulationResult():
 
     def getPropellantLength(self):
         """Returns the total length of all propellant before the simulated burn."""
-        return sum([g.props['length'].getValue() for g in self.motor.grains])
+        return sum([g.getInitialLength() for g in self.motor.grains])
 
     def getPropellantMass(self, index=0):
         """Returns the total mass of all propellant before the simulated burn. Optionally accepts a index that the mass
