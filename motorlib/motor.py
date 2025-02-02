@@ -24,6 +24,7 @@ class MotorConfig(PropertyCollection):
         self.props['timestep'] = FloatProperty('Simulation Timestep', 's', 0.0001, 0.1)
         self.props['ambPressure'] = FloatProperty('Ambient Pressure', 'Pa', 0.0001, 102000)
         self.props['mapDim'] = IntProperty('Grain Map Dimension', '', 250, 2000)
+        self.props['3DmapDim'] = IntProperty('3D Grain Map Dimension', '', 32, 2000)
         self.props['sepPressureRatio'] = FloatProperty('Separation Pressure Ratio', '', 0.001, 1)
 
 

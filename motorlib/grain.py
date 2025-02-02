@@ -9,9 +9,12 @@ from skimage import measure
 from scipy.signal import savgol_filter
 from scipy import interpolate
 
+import trimesh
+
 from . import geometry
 from .simResult import SimAlert, SimAlertLevel, SimAlertType
-from .properties import FloatProperty, EnumProperty, PropertyCollection
+from .properties import FloatProperty, EnumProperty, BooleanProperty, PropertyCollection
+from .units import convert
 
 class Grain(PropertyCollection):
     """A basic propellant grain. This is the class that all grains inherit from. It provides a few properties and
@@ -60,6 +63,10 @@ class Grain(PropertyCollection):
     @abstractmethod
     def getPortArea(self, regDist):
         """Returns the area of the grain's port when it has regressed a distance of 'regDist'"""
+
+    @abstractmethod
+    def getInitialLength(self):
+        """Returns the length of the grain before any burning has begun"""
 
     def getRegressedLength(self, regDist):
         """Returns the length of the grain when it has regressed a distance of 'regDist', taking any possible
@@ -160,6 +167,9 @@ class PerforatedGrain(Grain):
         faceArea = self.getFaceArea(regDist)
         uncored = geometry.circleArea(self.props['diameter'].getValue())
         return uncored - faceArea
+
+    def getInitialLength(self):
+        return self.props['length'].getValue()
 
     def getMassFlux(self, massIn, dTime, regDist, dRegDist, position, density):
         diameter = self.props['diameter'].getValue()
@@ -334,3 +344,293 @@ class FmmGrain(PerforatedGrain):
             print(exc)
 
         return (masked, regressionMap, contours, contourLengths)
+
+class Fmm3DGrain(Grain):
+    """A grain that uses a 3D version of the fast marching method to calculate its regression. All a subclass has to do
+    is provide an implementation of generateCoreMap that makes a 3D model of the grain and core."""
+    geomName = '3dFmmGrain'
+    def __init__(self):
+        super().__init__()
+        self.mapDim = 64
+        self.mapLength = None
+
+        self.mapX, self.mapY, self.mapZ = None, None, None
+        self.mask = None
+        self.coreMap = None
+        self.regressionMap = None
+
+        self.props['length'] = FloatProperty('Endburner Length', 'm', 0, 10)
+        self.props['inhibitedEnds'] = EnumProperty('Inhibited ends', ['Neither', 'Top', 'Bottom', 'Both'])
+        self.totalLength = None
+
+        self.props['meshedMassFlux'] = BooleanProperty("Use Mesh For Mass Flux (slow)")
+        self.props['meshedMassFlux'].setValue(True)
+        self.props['massFlux3D'] = BooleanProperty('Calculate 3D Mass Flux (slower)')
+    
+    def normalize(self, value):
+        """Transforms real unit quantities into self.mapX, self.mapY coordinates. For use in indexing into the
+        coremap."""
+        return value / (0.5 * self.props['diameter'].getValue())
+
+    def unNormalize(self, value):
+        """Transforms self.mapX, self.mapY coordinates to real unit quantities. Used to determine real lengths in
+        coremap."""
+        return (value / 2) * self.props['diameter'].getValue()
+
+    def lengthToMap(self, value):
+        """Converts meters to pixels. Used to compare real distances to pixel distances in the regression map."""
+        return self.mapDim * (value / self.props['diameter'].getValue())
+
+    def mapToLength(self, value):
+        """Converts pixels to meters. Used to extract real distances from pixel distances such as contour lengths"""
+        return self.props['diameter'].getValue() * (value / self.mapDim)
+
+    def areaToMap(self, value):
+        """Used to convert sqm to sq pixels, like on the regression map."""
+        return (self.mapDim ** 2) * (value / (self.props['diameter'].getValue() ** 2))
+
+    def mapToArea(self, value):
+        """Used to convert sq pixels to sqm. For extracting real areas from the regression map."""
+        return (self.props['diameter'].getValue() ** 2) * (value / (self.mapDim ** 2))
+    
+    def volumeToMap(self, value):
+        """Used to convert cu m to cu pixels, like on the regression map."""
+        return (self.mapDim ** 3) * (value / (self.props['diameter'].getValue() ** 3))
+
+    def mapToVolume(self, value):
+        """Used to convert cu pixels to cu m. For extracting real volumes from the regression map."""
+        return (self.props['diameter'].getValue() ** 3) * (value / (self.mapDim ** 3))
+    
+    @abstractmethod
+    def generateCoreMap(self):
+        """Generate an image of the grain cross section in self.coreMap. A 0 in the image means propellant, and a 1 means no propellant."""
+
+    def simulationSetup(self, config):
+        mapSize = config.getProperty("3DmapDim")
+        # mapLength = mapSize * np.ceil(self.lengthToMap(self.props['length'].getValue() + self.props['diameter'].getValue()) / self.lengthToMap(self.props['diameter'].getValue())).astype(int) 
+
+        self.generateCoreMap(mapSize)
+        self.generateRegressionMap()
+
+    def generateRegressionMap(self):
+        """Uses the fast marching method to generate an image of how the grain regresses from the core map. The map
+        is stored under self.regressionMap."""
+
+        # The following lines of code are done to enable burning from the ends without adding the "uninhibited disk"
+        # length to the total grain length. Should probably rework how initGeometry, generateCoreMap, and generateRegressionMap
+        # work for the Fmm3DGrain as they make less sense in this context
+        mask = self.mask 
+        uninhibited_disk = np.zeros((1, self.mapDim, self.mapDim))
+        coreMapUninhib = self.coreMap
+        if self.props['inhibitedEnds'].getValue() in ['Top', 'Neither']:# BOTTOM
+            coreMapUninhib = np.insert(coreMapUninhib, 0, uninhibited_disk, axis=0)
+        if self.props['inhibitedEnds'].getValue() in ['Bottom', 'Neither']:# TOP
+            coreMapUninhib = np.append(coreMapUninhib, uninhibited_disk, axis=0)
+        if self.props['inhibitedEnds'].getValue() != 'Both':
+            _, mapX, mapY = np.meshgrid(np.linspace(-1, 1, coreMapUninhib.shape[0]), np.linspace(-1, 1, self.mapDim), np.linspace(-1, 1, self.mapDim), indexing='ij')
+            mask = mapX**2 + mapY**2 > 1
+        valid = np.logical_not(mask)
+
+        cellSize = 1 / self.mapDim
+        regressionMapUninhib = skfmm.distance(coreMapUninhib, dx=cellSize) * 2
+
+        # # FIXME:
+        # plt.figure(figsize=(16,8))
+        # plt.contourf(self.regressionMap[:,int(self.mapDim/2),:], cmap='viridis', aspect='equal')
+        # plt.colorbar()
+        # plt.gca().set_aspect("equal")
+        # plt.show()
+
+        maxDist = np.amax(regressionMapUninhib)
+        self.wallWeb = self.unNormalize(maxDist)
+
+        polled = []
+        burningArea = []
+        for i in range(int(maxDist * self.mapDim) * 10):
+            try:
+                verts, faces, _, _ = measure.marching_cubes(regressionMapUninhib, level=i / self.mapDim, mask = valid)
+            except RuntimeError:
+                break
+            except ValueError:
+                break
+            polled.append(i / self.mapDim)
+            burningArea.append(self.mapToArea(measure.mesh_surface_area(verts, faces)))
+
+        self.faceArea = savgol_filter(burningArea, 31, 5)
+        self.faceAreaFunc = interpolate.interp1d(polled, self.faceArea)
+
+        # Remove uninhibited disks, if necessary
+        if self.props['inhibitedEnds'].getValue() in ['Top', 'Neither']:# BOTTOM
+            regressionMapUninhib = regressionMapUninhib[1:]
+        if self.props['inhibitedEnds'].getValue() in ['Bottom', 'Neither']:# TOP
+            regressionMapUninhib = regressionMapUninhib[:-1]
+
+        self.regressionMap = regressionMapUninhib
+
+    def getSurfaceAreaAtRegression(self, regDist):
+        mapDist = self.normalize(regDist)
+        index = int(mapDist * self.mapDim)
+        if index >= len(self.faceArea) - 1:
+            return 0 # Past burnout
+        return self.faceAreaFunc(mapDist)
+
+    def getFaceImage(self, mapDim):
+        # if self.coreMap is None:
+        #     self.generateCoreMap(self.mapDim)
+        masked = np.ma.MaskedArray(self.coreMap, self.mask)
+        return masked
+
+    def getRegressionImage(self, mapDim):
+        # if self.regressionMap is None:
+        #     self.generateCoreMap(self.mapDim)
+        #     self.generateRegressionMap()
+        masked = np.ma.MaskedArray(self.regressionMap, self.mask)
+        return masked
+
+    def getVolumeAtRegression(self, regDist):
+        mapDist = self.normalize(regDist)
+        index = int(mapDist * self.mapDim)
+        if index >= len(self.faceArea) - 1:
+            return 0 # Past burnout
+        regressionMasked = np.ma.MaskedArray(self.regressionMap, self.mask)
+        return self.mapToVolume(np.sum(regressionMasked > mapDist))
+    
+    def getGrainBoundingVolume(self):
+        """Returns the volume of the bounding cylinder around the grain"""
+        if self.totalLength is None:
+            self.generateCoreMap(self.mapDim)
+
+        return geometry.cylinderVolume(self.props['diameter'].getValue(), self.totalLength.getValue())
+
+    def getWebLeft(self, regDist):
+        wallLeft = self.wallWeb - regDist
+        return wallLeft
+    
+    def getMassFlux(self, massIn, dTime, regDist, dRegDist, position, density):
+        if self.props['meshedMassFlux'].getValue():
+            mapDist = self.normalize(regDist)
+            verts, faces, normals, values = measure.marching_cubes(self.regressionMap, level=mapDist / self.mapDim, mask = np.logical_not(np.logical_and(self.mask, self.mapZ > position)))
+            # massFluxMesh = trimesh.Trimesh(vertices=verts, faces=faces)
+
+            coreArea = np.sum(np.ma.MaskedArray(self.regressionMap, self.mask)[position] < mapDist + self.normalize(dRegDist))
+
+            # massFluxMesh = trimesh.intersections.slice_mesh_plane(massFluxMesh, (1,0,0), (position + 1,0,0))
+            # burningArea = self.mapToArea(massFluxMesh.area)
+            burningArea = self.mapToArea(measure.mesh_surface_area(verts, faces))
+
+            coreArea = self.mapToArea(coreArea)
+
+            print(position, coreArea, burningArea, (massIn + density * burningArea * dRegDist) / (coreArea * dTime) )
+
+            return (massIn + density * burningArea * dRegDist) / (coreArea * dTime) 
+        
+        # Find core area at slice
+        mapDist = self.normalize(regDist + dRegDist / 2) # Averaged through timestep
+        mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
+        coreArea = np.sum(np.logical_not(mapAtReg[position]))
+
+        # Find initial vol
+        mapDist = self.normalize(regDist)
+        mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
+        mapAtReg = mapAtReg[position + 1:]
+        initialPropVolume = np.sum(mapAtReg)
+
+        # Find final vol
+        mapDist = self.normalize(regDist + dRegDist)
+        mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
+        mapAtReg = mapAtReg[position + 1:]
+        finalPropVolume = np.sum(mapAtReg)
+
+        massFlow = massIn + density * (self.mapToVolume(initialPropVolume) - self.mapToVolume(finalPropVolume)) / dTime
+        return massFlow / self.mapToArea(coreArea)
+
+    def getPeakMassFlux(self, massIn, dTime, regDist, dRegDist, density):
+        propEndPos = self.getEndPositionsInMapDim(regDist)
+        
+        if self.props['massFlux3D'].getValue():
+            peakFlux = -np.inf
+            peakFluxPos = None
+            for position in range(propEndPos[0], propEndPos[1] - 1):
+                massFlux = self.getMassFlux(massIn, dTime, regDist, dRegDist, position, density)
+                if massFlux > peakFlux:
+                    peakFlux = massFlux
+                    peakFluxPos = position
+            return peakFlux
+        
+        return self.getMassFlux(massIn, dTime, regDist, dRegDist, propEndPos[0], density)
+
+    def getEndPositions(self, regDist):
+        """Returns the positions of the grain ends relative to the original (unburned) grain fore in the format of (fore,aft)"""
+        aft, fore = self.getEndPositionsInMapDim(regDist)
+        return self.mapToLength(self.mapLength - fore - 1), self.mapToLength(self.mapLength - aft - 1)
+        
+    def getEndPositionsInMapDim(self, regDist):
+        """Returns the aft-most, fore-most indices into regressionMap and coreMap that still have prop"""
+        # if self.regressionMap is None:
+        #     self.generateCoreMap(self.mapDim)
+        #     self.generateRegressionMap()
+
+        mapDist = self.normalize(regDist)
+        mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
+        mapAtReg = mapAtReg.reshape((mapAtReg.shape[0], -1))
+
+        lengthwiseProp = np.sum(mapAtReg, axis=1)
+        idxHasProp = np.asarray(lengthwiseProp > 0).nonzero()[0]
+
+        # print(self.mapLength - idxHasProp[-1] - 1, self.mapLength - idxHasProp[0] - 1)
+        return idxHasProp[0], idxHasProp[-1]
+
+    def getPortArea(self, regDist):
+        """For a given regDist, gets the aft-most slice in the motor where prop exists and finds the port area."""
+        # if self.regressionMap is None:
+        #     self.generateCoreMap(self.mapDim)
+        #     self.generateRegressionMap()
+
+        mapDist = self.normalize(regDist)
+        mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
+
+        mapAtReg = mapAtReg.reshape((mapAtReg.shape[0], -1))
+
+        lengthwiseProp = np.sum(mapAtReg, axis=1)
+        lengthwiseCores = np.sum(np.logical_not(mapAtReg), axis=1)
+
+        return self.mapToArea(lengthwiseCores[lengthwiseProp > 0][0])
+
+    def getInitialLength(self):
+        return self.totalLength.getValue()
+
+    def getDetailsString(self, lengthUnit='m'):
+        """Returns a short string describing the grain, formatted using the units that is passed in"""
+        if self.coreMap is None:
+            self.generateCoreMap(self.mapDim)
+
+        return 'Length: {}'.format(self.totalLength.dispFormat(lengthUnit))
+    
+    # def getPortArea(self, regDist):z
+    #     """For a given regDist, gets the minimum port area down the entire grain core."""
+    #     if self.regressionMap is None:
+    #         self.initGeometry(self.mapDim)
+    #         self.generateCoreMap()
+    #         self.generateRegressionMap()
+
+    #     mapDist = self.normalize(regDist)
+    #     mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
+
+    #     mapAtReg = mapAtReg.reshape((mapAtReg.shape[0], -1))
+
+    #     lengthwiseProp = np.sum(mapAtReg, axis=1)
+    #     lengthwiseCores = np.sum(np.logical_not(mapAtReg), axis=1)
+
+    #     return self.mapToArea(lengthwiseCores[lengthwiseProp > 0][0])
+    
+    def getGeometryErrors(self):
+        """Returns a list of simAlerts that detail any issues with the geometry of the grain. Errors should be
+        used for any condition that prevents simulation of the grain, while warnings can be used to notify the
+        user of possible non-fatal mistakes in their entered numbers. Subclasses should still call the superclass
+        method, as it performs checks that still apply to its subclasses."""
+        errors = []
+        if self.props['diameter'].getValue() == 0:
+            errors.append(SimAlert(SimAlertLevel.ERROR, SimAlertType.GEOMETRY, 'Diameter must not be 0'))
+        if self.props['length'].getValue() > 0 and self.props['inhibitedEnds'].getValue() in ['Neither', 'Bottom']:
+            errors.append(SimAlert(SimAlertLevel.ERROR, SimAlertType.GEOMETRY, 'Cannot have endburner when grain top uninhibited'))
+        return errors
