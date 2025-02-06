@@ -72,7 +72,13 @@ class App(QApplication):
             sys.exit(0)
 
         else:
-            logger.log('Opening window (dark mode: {})'.format(self.isDarkMode()))
+            usingDarkMode = self.isDarkMode()
+            currentTheme = self.style().objectName()
+            logger.log('Opening window (dark mode: {}, default theme: "{}")'.format(usingDarkMode, currentTheme))
+            # Windows 10 and before don't have dark mode versions of their themes, so if the user wants dark mode, we have to switch to fusion
+            if usingDarkMode and currentTheme in ['windows', 'windowsvista']:
+                logger.log('Overriding theme to fusion to get dark mode')
+                self.setStyle('fusion')
             self.window = uilib.widgets.mainWindow.Window(self)
             self.preferencesManager.publishPreferences()
             if startupFileLoaded:
