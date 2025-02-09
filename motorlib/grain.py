@@ -602,7 +602,8 @@ class Fmm3DGrain(Grain):
     def getDetailsString(self, lengthUnit='m'):
         """Returns a short string describing the grain, formatted using the units that is passed in"""
         if self.coreMap is None:
-            self.generateCoreMap(self.mapDim)
+            # self.generateCoreMap(self.mapDim)
+            return 'Length: 0'
 
         return 'Length: {}'.format(self.totalLength.dispFormat(lengthUnit))
     
