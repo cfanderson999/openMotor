@@ -521,27 +521,25 @@ class Fmm3DGrain(Grain):
             coreArea = self.mapToArea(coreArea)
 
             print(position, coreArea, burningArea, (massIn + density * burningArea * dRegDist) / (coreArea * dTime) )
-
+ 
             return (massIn + density * burningArea * dRegDist) / (coreArea * dTime) 
         
         # Find core area at slice
-        mapDist = self.normalize(regDist + dRegDist / 2) # Averaged through timestep
+        mapDist = self.normalize(regDist)
         mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
         coreArea = np.sum(np.logical_not(mapAtReg[position]))
 
         # Find initial vol
-        mapDist = self.normalize(regDist)
-        mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
-        mapAtReg = mapAtReg[position + 1:]
-        initialPropVolume = np.sum(mapAtReg)
+        mapAtReg = mapAtReg[position:]
+        initialPropVolume = self.mapToVolume(np.sum(mapAtReg))
 
         # Find final vol
         mapDist = self.normalize(regDist + dRegDist)
         mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
-        mapAtReg = mapAtReg[position + 1:]
-        finalPropVolume = np.sum(mapAtReg)
+        mapAtReg = mapAtReg[position:]
+        finalPropVolume = self.mapToVolume(np.sum(mapAtReg))
 
-        massFlow = massIn + density * (self.mapToVolume(initialPropVolume) - self.mapToVolume(finalPropVolume)) / dTime
+        massFlow = (massIn + density * (initialPropVolume - finalPropVolume)) / dTime
         return massFlow / self.mapToArea(coreArea)
 
     def getPeakMassFlux(self, massIn, dTime, regDist, dRegDist, density):
