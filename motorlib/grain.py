@@ -10,6 +10,7 @@ from scipy.signal import savgol_filter
 from scipy import interpolate
 
 import trimesh
+import matplotlib.pyplot as plt
 
 from . import geometry
 from .simResult import SimAlert, SimAlertLevel, SimAlertType
@@ -434,6 +435,8 @@ class Fmm3DGrain(Grain):
         cellSize = 1 / self.mapDim
         regressionMapUninhib = skfmm.distance(coreMapUninhib, dx=cellSize) * 2
 
+        coreMapUninhibMasked = np.ma.MaskedArray(coreMapUninhib, mask)
+        regressionMapUninhibMasked = skfmm.distance(coreMapUninhibMasked, dx=cellSize) * 2
         # # FIXME:
         # plt.figure(figsize=(16,8))
         # plt.contourf(self.regressionMap[:,int(self.mapDim/2),:], cmap='viridis', aspect='equal')
@@ -446,6 +449,7 @@ class Fmm3DGrain(Grain):
 
         polled = []
         burningArea = []
+        propVolume = []
         for i in range(int(maxDist * self.mapDim) * 10):
             try:
                 verts, faces, _, _ = measure.marching_cubes(regressionMapUninhib, level=i / self.mapDim, mask = valid)
@@ -456,8 +460,13 @@ class Fmm3DGrain(Grain):
             polled.append(i / self.mapDim)
             burningArea.append(self.mapToArea(measure.mesh_surface_area(verts, faces)))
 
+            propVolume.append(self.mapToVolume(np.sum(regressionMapUninhibMasked > i / self.mapDim)))
+
         self.faceArea = savgol_filter(burningArea, 31, 5)
         self.faceAreaFunc = interpolate.interp1d(polled, self.faceArea)
+
+        self.propVolume = savgol_filter(propVolume, 31, 5)
+        self.propVolumeFunc = interpolate.interp1d(polled, self.propVolume)
 
         # Remove uninhibited disks, if necessary
         if self.props['inhibitedEnds'].getValue() in ['Top', 'Neither']:# BOTTOM
@@ -492,6 +501,7 @@ class Fmm3DGrain(Grain):
         index = int(mapDist * self.mapDim)
         if index >= len(self.faceArea) - 1:
             return 0 # Past burnout
+        return self.propVolumeFunc(mapDist)
         regressionMasked = np.ma.MaskedArray(self.regressionMap, self.mask)
         return self.mapToVolume(np.sum(regressionMasked > mapDist))
     
@@ -512,16 +522,16 @@ class Fmm3DGrain(Grain):
             verts, faces, normals, values = measure.marching_cubes(self.regressionMap, level=mapDist / self.mapDim, mask = np.logical_not(np.logical_and(self.mask, self.mapZ > position)))
             # massFluxMesh = trimesh.Trimesh(vertices=verts, faces=faces)
 
-            coreArea = np.sum(np.ma.MaskedArray(self.regressionMap, self.mask)[position] < mapDist + self.normalize(dRegDist))
+            coreArea = np.sum(np.ma.MaskedArray(self.regressionMap, self.mask)[position] <= mapDist)
 
             # massFluxMesh = trimesh.intersections.slice_mesh_plane(massFluxMesh, (1,0,0), (position + 1,0,0))
             # burningArea = self.mapToArea(massFluxMesh.area)
             burningArea = self.mapToArea(measure.mesh_surface_area(verts, faces))
 
-            coreArea = self.mapToArea(coreArea)
+            coreArea = self.mapToArea(coreArea) * 2.0
 
-            print(position, coreArea, burningArea, (massIn + density * burningArea * dRegDist) / (coreArea * dTime) )
- 
+            # print(position, mapDist, coreArea, burningArea, (massIn + density * burningArea * dRegDist) / (coreArea * dTime) )
+
             return (massIn + density * burningArea * dRegDist) / (coreArea * dTime) 
         
         # Find core area at slice
@@ -573,8 +583,9 @@ class Fmm3DGrain(Grain):
         mapAtReg = mapAtReg.reshape((mapAtReg.shape[0], -1))
 
         lengthwiseProp = np.sum(mapAtReg, axis=1)
-        idxHasProp = np.asarray(lengthwiseProp > 0).nonzero()[0]
+        idxHasProp = np.asarray(lengthwiseProp > 1e-9).nonzero()[0]
 
+        # print(lengthwiseProp[np.asarray(lengthwiseProp > 0.0).nonzero()[0][0]])
         # print(self.mapLength - idxHasProp[-1] - 1, self.mapLength - idxHasProp[0] - 1)
         return idxHasProp[0], idxHasProp[-1]
 
@@ -592,7 +603,7 @@ class Fmm3DGrain(Grain):
         lengthwiseProp = np.sum(mapAtReg, axis=1)
         lengthwiseCores = np.sum(np.logical_not(mapAtReg), axis=1)
 
-        return self.mapToArea(lengthwiseCores[lengthwiseProp > 0][0])
+        return self.mapToArea(lengthwiseCores[lengthwiseProp > 0][0]) * 2.0
 
     def getInitialLength(self):
         return self.totalLength.getValue()

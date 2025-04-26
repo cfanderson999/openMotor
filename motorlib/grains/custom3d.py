@@ -76,6 +76,6 @@ class custom3d(Fmm3DGrain):
 
         coreArray = np.pad(coreArray, pad_width=((before[0], after[0]), (before[1], after[1]), (before[2], after[2])), mode='constant', constant_values=1)
 
-        print(coreArray.shape)
+        # print(coreArray.shape)
 
         self.coreMap = coreArray
