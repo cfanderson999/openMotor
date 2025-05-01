@@ -9,13 +9,9 @@ from skimage import measure
 from scipy.signal import savgol_filter
 from scipy import interpolate
 
-import trimesh
-import matplotlib.pyplot as plt
-
 from . import geometry
 from .simResult import SimAlert, SimAlertLevel, SimAlertType
 from .properties import FloatProperty, EnumProperty, BooleanProperty, PropertyCollection
-from .units import convert
 
 class Grain(PropertyCollection):
     """A basic propellant grain. This is the class that all grains inherit from. It provides a few properties and
@@ -367,6 +363,8 @@ class Fmm3DGrain(Grain):
         self.props['meshedMassFlux'] = BooleanProperty("Use Mesh For Mass Flux (slow)")
         self.props['meshedMassFlux'].setValue(True)
         self.props['massFlux3D'] = BooleanProperty('Calculate 3D Mass Flux (slower)')
+
+        self.coreMapHash = -1
     
     def normalize(self, value):
         """Transforms real unit quantities into self.mapX, self.mapY coordinates. For use in indexing into the
@@ -410,7 +408,9 @@ class Fmm3DGrain(Grain):
         mapSize = config.getProperty("3DmapDim")
         # mapLength = mapSize * np.ceil(self.lengthToMap(self.props['length'].getValue() + self.props['diameter'].getValue()) / self.lengthToMap(self.props['diameter'].getValue())).astype(int) 
 
-        self.generateCoreMap(mapSize)
+        self.mapDim = mapSize
+
+        self.generateCoreMap()
         self.generateRegressionMap()
 
     def generateRegressionMap(self):
@@ -508,7 +508,7 @@ class Fmm3DGrain(Grain):
     def getGrainBoundingVolume(self):
         """Returns the volume of the bounding cylinder around the grain"""
         if self.totalLength is None:
-            self.generateCoreMap(self.mapDim)
+            self.generateCoreMap()
 
         return geometry.cylinderVolume(self.props['diameter'].getValue(), self.totalLength.getValue())
 
@@ -528,11 +528,10 @@ class Fmm3DGrain(Grain):
             # burningArea = self.mapToArea(massFluxMesh.area)
             burningArea = self.mapToArea(measure.mesh_surface_area(verts, faces))
 
-            coreArea = self.mapToArea(coreArea) * 2.0
-
+            coreArea = self.mapToArea(coreArea)
             # print(position, mapDist, coreArea, burningArea, (massIn + density * burningArea * dRegDist) / (coreArea * dTime) )
 
-            return (massIn + density * burningArea * dRegDist) / (coreArea * dTime) 
+            return (massIn + density * burningArea * dRegDist) / (self.getPortArea(regDist) * dTime) 
         
         # Find core area at slice
         mapDist = self.normalize(regDist)
@@ -591,19 +590,16 @@ class Fmm3DGrain(Grain):
 
     def getPortArea(self, regDist):
         """For a given regDist, gets the aft-most slice in the motor where prop exists and finds the port area."""
-        # if self.regressionMap is None:
-        #     self.generateCoreMap(self.mapDim)
-        #     self.generateRegressionMap()
+        aft, fore = self.getEndPositionsInMapDim(regDist)
 
         mapDist = self.normalize(regDist)
         mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
 
-        mapAtReg = mapAtReg.reshape((mapAtReg.shape[0], -1))
+        propArea = self.mapToArea(np.sum(mapAtReg[aft]))
 
-        lengthwiseProp = np.sum(mapAtReg, axis=1)
-        lengthwiseCores = np.sum(np.logical_not(mapAtReg), axis=1)
+        uncored = geometry.circleArea(self.props['diameter'].getValue())
 
-        return self.mapToArea(lengthwiseCores[lengthwiseProp > 0][0]) * 2.0
+        return uncored - propArea
 
     def getInitialLength(self):
         return self.totalLength.getValue()

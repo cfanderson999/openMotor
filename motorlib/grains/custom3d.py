@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt #FIXME
 
 import pyvista as pv
 import numpy as np
+import hashlib
+import pickle
 
 from ..grain import Fmm3DGrain
 from ..properties import MeshProperty, EnumProperty, FloatProperty
@@ -22,8 +24,23 @@ class custom3d(Fmm3DGrain):
         self.faces = []
         self.vertices = []
 
-    def generateCoreMap(self, mapDim):
-        self.mapDim = mapDim
+    def hashCoreMapInputs(self):
+        mapDim = self.mapDim
+        inUnit = self.props['stlUnit'].getValue()
+        faces = self.props['mesh'].getValue()[0]
+        vertices = self.props['mesh'].getValue()[1]
+        diameter = self.props['diameter'].getValue()
+        length = self.props['length'].getValue()
+
+        byte_string = pickle.dumps([mapDim, inUnit, faces, vertices, diameter, length])
+        return hashlib.sha256(byte_string).hexdigest()
+
+    def generateCoreMap(self):
+        # newCoreMapHash = self.hashCoreMapInputs()
+        # if newCoreMapHash == self.coreMapHash:
+        #     return 0
+        # else:
+        #     self.coreMapHash = newCoreMapHash
 
         inUnit = self.props['stlUnit'].getValue()
 
@@ -75,7 +92,7 @@ class custom3d(Fmm3DGrain):
                 before[i], after[i] = 0,0
 
         coreArray = np.pad(coreArray, pad_width=((before[0], after[0]), (before[1], after[1]), (before[2], after[2])), mode='constant', constant_values=1)
-
-        # print(coreArray.shape)
+        coreArray = np.flip(coreArray, axis=0)
+        print(coreArray.shape)
 
         self.coreMap = coreArray
