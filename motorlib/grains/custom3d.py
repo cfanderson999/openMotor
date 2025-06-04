@@ -92,7 +92,7 @@ class custom3d(Fmm3DGrain):
                 before[i], after[i] = 0,0
 
         coreArray = np.pad(coreArray, pad_width=((before[0], after[0]), (before[1], after[1]), (before[2], after[2])), mode='constant', constant_values=1)
-        coreArray = np.flip(coreArray, axis=0)
-        print(coreArray.shape)
+        
+        # coreArray = np.flip(coreArray, axis=0)
 
         self.coreMap = coreArray
