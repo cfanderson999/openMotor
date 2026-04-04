@@ -99,6 +99,34 @@ class PolygonProperty(Property):
         self.value = []
 
 
+class MeshProperty(Property):
+    """A property that contains a list of verticies and a list of triangles, each defined by a list of 3 vertices"""
+    def __init__(self, dispName):
+        super().__init__(dispName, '', list)
+        self.faces = []
+        self.vertices = []
+
+    def getValue(self):
+        return self.faces, self.vertices
+    
+    def setValue(self, value):
+        self.faces, self.vertices = value[0], value[1]
+
+
+class MeshProperty(Property):
+    """A property that contains a list of verticies and a list of triangles, each defined by a list of 3 vertices"""
+    def __init__(self, dispName):
+        super().__init__(dispName, '', list)
+        self.faces = []
+        self.vertices = []
+
+    def getValue(self):
+        return self.faces, self.vertices
+    
+    def setValue(self, value):
+        self.faces, self.vertices = value[0], value[1]
+
+
 class TabularProperty(Property):
     """A property that is composed of a number of 'tabs', each of which is a property collection of its own."""
 

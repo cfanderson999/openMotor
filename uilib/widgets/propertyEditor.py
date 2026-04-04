@@ -7,6 +7,7 @@ from PyQt6.QtCore import pyqtSignal, Qt
 import motorlib
 
 from .polygonEditor import PolygonEditor
+from .meshEditor import MeshEditor
 from .tabularEditor import TabularEditor
 
 class PropertyEditor(QWidget):
@@ -82,6 +83,15 @@ class PropertyEditor(QWidget):
 
             self.layout().addWidget(self.editor)
 
+        elif isinstance(prop, motorlib.properties.MeshProperty):
+            self.editor = MeshEditor(self)
+
+            self.editor.meshChanged.connect(self.valueChanged.emit)
+            self.editor.faces, self.editor.vertices = self.prop.getValue()
+            self.editor.preferences = self.preferences
+
+            self.layout().addWidget(self.editor)
+
         elif isinstance(prop, motorlib.properties.TabularProperty):
             self.editor = TabularEditor()
 
@@ -110,6 +120,9 @@ class PropertyEditor(QWidget):
 
         if isinstance(self.prop, motorlib.properties.PolygonProperty):
             return self.editor.points
+        
+        if isinstance(self.prop, motorlib.properties.MeshProperty):
+            return self.editor.faces, self.editor.vertices
 
         if isinstance(self.prop, motorlib.properties.TabularProperty):
             return self.editor.getTabs()
