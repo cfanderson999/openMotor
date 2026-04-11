@@ -43,6 +43,11 @@ class MotorEditor(CollectionEditor):
             testGrain.setProperties(self.getProperties())
             self.grainPreview.loadGrain(testGrain)
 
+        if 'stlUnit' in self.propertyEditors and 'mesh' in self.propertyEditors:
+            self.propertyEditors['mesh'].editor.setMeshUnit(
+                self.propertyEditors['stlUnit'].getValue()
+            )
+
     def loadObject(self, obj):
         self.objType = type(obj)
         self.loadProperties(obj)

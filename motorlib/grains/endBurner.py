@@ -30,3 +30,6 @@ class EndBurningGrain(Grain):
 
     def getEndPositions(self, regDist):
         return (0, self.props['length'].getValue() - regDist)
+
+    def getInitialLength(self):
+        return self.props['length'].getValue()

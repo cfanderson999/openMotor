@@ -2,13 +2,15 @@ import sys
 from threading import Thread
 
 from PyQt6.QtWidgets import QMainWindow, QTableWidgetItem, QHeaderView
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 
 import motorlib
 import uilib.widgets.aboutDialog
 from uilib.views.MainWindow_ui import Ui_MainWindow
 
 class Window(QMainWindow):
+    _quickResultsReady = pyqtSignal(dict)
+
     def __init__(self, app):
         QMainWindow.__init__(self)
         self.ui = Ui_MainWindow()
@@ -44,6 +46,8 @@ class Window(QMainWindow):
 
         self.app.toolManager.setupMenu(self.ui.menuTools)
         self.app.toolManager.changeApplied.connect(self.postLoadUpdate)
+
+        self._quickResultsReady.connect(self.showQuickResults)
 
         self.setupMotorStats()
         self.setupMotorEditor()
@@ -326,10 +330,10 @@ class Window(QMainWindow):
         self.ui.labelDeliveredThrustCoefficient.setText(self.formatMotorStat(simResult.getAdjustedThrustCoefficient(), ''))
 
     def getQuickResults(self, motor):
-        thread = lambda: self.showQuickResults(motor.getQuickResults())
-
-        dataThread = Thread(target=thread)
-        dataThread.start()
+        def _worker():
+            results = motor.getQuickResults()
+            self._quickResultsReady.emit(results)
+        Thread(target=_worker).start()
 
     def showQuickResults(self, results):
         self.ui.labelVolumeLoading.setText('{:.2f}%'.format(results['volumeLoading']))

@@ -19,6 +19,8 @@ class SimulationProgressDialog(QDialog):
 
     def show(self):
         self.ui.progressBar.setValue(0)
+        self.ui.label.setText("Running simulation...")
+        self.ui.progressBar.setMaximum(100)
         super().show()
 
     def closeEvent(self, event=None):
@@ -27,3 +29,9 @@ class SimulationProgressDialog(QDialog):
 
     def progressUpdate(self, progress):
         self.ui.progressBar.setValue(int(progress * 100))
+
+    def setLabel(self, text):
+        self.ui.label.setText(text)
+
+    def setIndeterminate(self, indeterminate):
+        self.ui.progressBar.setMaximum(0 if indeterminate else 100)

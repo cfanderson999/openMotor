@@ -6,6 +6,7 @@ from PyQt6.QtCore import pyqtSignal
 from .widgets.simulationAlertsDialog import SimulationAlertsDialog
 from .widgets.simulationProgressDialog import SimulationProgressDialog
 from .logger import logger
+from motorlib.grain import Fmm3DGrain
 
 class SimulationManager(QObject):
 
@@ -13,12 +14,14 @@ class SimulationManager(QObject):
     newSimulationResult = pyqtSignal(object)
     simProgress = pyqtSignal(float)
     simCanceled = pyqtSignal()
+    simStage = pyqtSignal(str, bool)  # (label text, indeterminate)
 
     def __init__(self):
         super().__init__()
 
         self.progDialog = SimulationProgressDialog()
         self.simProgress.connect(self.progDialog.progressUpdate)
+        self.simStage.connect(self._applyStage)
         self.simulationDone.connect(self.progDialog.hide)
         self.progDialog.simulationCanceled.connect(self.cancelSim)
 
@@ -38,12 +41,24 @@ class SimulationManager(QObject):
         logger.log('Running simulation')
         self.motor = motor
         self.threadStopped = False
+        has3d = any(isinstance(g, Fmm3DGrain) for g in motor.grains)
+        if has3d:
+            self.progDialog.setLabel("Building 3D grain map\u2026")
+            self.progDialog.setIndeterminate(True)
         self.progDialog.show()
-        self.currentSimThread = Thread(target=self._simThread, args=[show])
+        self.currentSimThread = Thread(target=self._simThread, args=[show, has3d])
         self.currentSimThread.start()
 
-    def _simThread(self, show):
-        simRes = self.motor.runSimulation(self.updateProgressBar)
+    def _applyStage(self, text, indeterminate):
+        self.progDialog.setLabel(text)
+        self.progDialog.setIndeterminate(indeterminate)
+
+    def _simThread(self, show, has3d):
+        if has3d:
+            on_sim_start = lambda: self.simStage.emit("Running simulation\u2026", False)
+        else:
+            on_sim_start = None
+        simRes = self.motor.runSimulation(self.updateProgressBar, onSimStart=on_sim_start)
         self.simulationDone.emit(simRes)
         if simRes.success and show:
             logger.log('Simulation succeeded')

@@ -87,8 +87,13 @@ class PropertyEditor(QWidget):
             self.editor = MeshEditor(self)
 
             self.editor.meshChanged.connect(self.valueChanged.emit)
-            self.editor.faces, self.editor.vertices = self.prop.getValue()
+            meshValue = self.prop.getValue()
+            faces = meshValue[0] if len(meshValue) > 0 else []
+            vertices = meshValue[1] if len(meshValue) > 1 else []
+            sourcePath = meshValue[2] if len(meshValue) > 2 else ''
+            self.editor.setMeshData(faces, vertices, sourcePath)
             self.editor.preferences = self.preferences
+            self.editor._updateLabel()
 
             self.layout().addWidget(self.editor)
 
@@ -122,7 +127,7 @@ class PropertyEditor(QWidget):
             return self.editor.points
         
         if isinstance(self.prop, motorlib.properties.MeshProperty):
-            return self.editor.faces, self.editor.vertices
+            return self.editor.faces, self.editor.vertices, self.editor.sourcePath
 
         if isinstance(self.prop, motorlib.properties.TabularProperty):
             return self.editor.getTabs()

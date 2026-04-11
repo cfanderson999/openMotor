@@ -187,6 +187,9 @@ class ConicalGrain(Grain):
         """Returns a short string describing the grain, formatted using the units that is passed in"""
         return 'Length: {}'.format(self.props['length'].dispFormat(lengthUnit))
 
+    def getInitialLength(self):
+        return self.props['length'].getValue()
+
     def simulationSetup(self, config):
         """Do anything needed to prepare this grain for simulation"""
         return None

@@ -1,5 +1,6 @@
 """Contains the motor class and a supporting configuration property collection."""
 
+import os
 from typing import Dict, Union, List
 import numpy as np
 from scipy.optimize import newton
@@ -187,7 +188,7 @@ class Motor:
 
         return max(M, 0)
 
-    def runSimulation(self, callback=None) -> SimulationResult:
+    def runSimulation(self, callback=None, onSimStart=None) -> SimulationResult:
         """Runs a simulation of the motor and returns a simRes instance with the results. Constraints are checked,
         including the number of grains, if the motor has a propellant set, and if the grains have geometry errors. If
         all of these tests are passed, the motor's operation is simulated by calculating Kn, using this value to get
@@ -246,12 +247,29 @@ class Motor:
         # Pull the required numbers from the propellant
         density = self.propellant.getProperty("density")
 
-        # Precalculate these are they don't change
-        motorVolume = self.calcTotalVolume()
+        # Generate coremaps for perforated grains (must come before calcTotalVolume
+        # so 3D grains have totalLength set).
+        # 3D FMM grains are expensive to set up (voxelization + FMM + MC sweep).
+        # When the motor has more than one grain, set them up in parallel using
+        # threads — grains are fully independent and the GIL is not needed for
+        # the heavy NumPy/Cython work.
+        if len(self.grains) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            _workers = min(len(self.grains), os.cpu_count() or 1)
+            with ThreadPoolExecutor(max_workers=_workers) as _pool:
+                _futs = {_pool.submit(g.simulationSetup, self.config): g
+                         for g in self.grains}
+                for _fut in as_completed(_futs):
+                    _fut.result()  # re-raise any grain-setup exceptions
+        else:
+            for grain in self.grains:
+                grain.simulationSetup(self.config)
 
-        # Generate coremaps for perforated grains
-        for grain in self.grains:
-            grain.simulationSetup(self.config)
+        if onSimStart is not None:
+            onSimStart()
+
+        # Precalculate these as they don't change
+        motorVolume = self.calcTotalVolume()
 
         # Setup initial values
         perGrainReg = [0 for grain in self.grains]
@@ -463,18 +481,20 @@ class Motor:
             else None
         )
         throatArea = self.nozzle.getThroatArea()
-        motorVolume = self.calcTotalVolume()
 
-        if motorVolume == 0:
-            return results
-
-        # Generate coremaps for perforated grains
+        # Generate coremaps for perforated grains (must come before calcTotalVolume
+        # so 3D grains have totalLength set)
         for grain in self.grains:
             for alert in grain.getGeometryErrors():
                 if alert.level == SimAlertLevel.ERROR:
                     return results
 
             grain.simulationSetup(self.config)
+
+        motorVolume = self.calcTotalVolume()
+
+        if motorVolume == 0:
+            return results
 
         perGrainReg = [0 for grain in self.grains]
 
