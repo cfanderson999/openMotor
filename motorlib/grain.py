@@ -95,6 +95,12 @@ def _marching_area_pixels(regression_map: np.ndarray, valid_mask: np.ndarray, le
 if _HAS_MARCH_CY:
     _marching_area_pixels = _marching_area_pixels_cy
 
+
+class _GrainSetupCanceled(Exception):
+    """Raised when a grain setup operation (voxelization / regression map build)
+    is aborted by the user via a cancel_check callback."""
+
+
 class Grain(PropertyCollection):
     """
     A basic propellant grain.
@@ -569,7 +575,7 @@ class Fmm3DGrain(Grain):
     # skfmm.distance() on a 128³ grid takes 2–10 s; a disk cache eliminates
     # the cost on repeat runs (app restart, parameter sweep with fixed geometry).
     # Cache files are stored as .npy under the system temp directory.
-    _FMM_DIST_CACHE_VERSION = '1'   # bump to invalidate all cached entries
+    _FMM_DIST_CACHE_VERSION = '2'   # bump to invalidate all cached entries
     _FMM_DIST_CACHE_DIR: 'pathlib.Path | None' = None
 
     @classmethod
@@ -583,8 +589,11 @@ class Fmm3DGrain(Grain):
     @staticmethod
     def _computeFmmCacheKey(coreMapUninhib: np.ndarray, cellSize: float) -> str:
         """SHA-256 fingerprint of the FMM inputs → hex string cache key."""
+        # Use buffer protocol directly — avoids a full .tobytes() copy that
+        # would double memory usage on large 3-D grids (mapDim=256 → ~66 MB).
         arr = np.ascontiguousarray(coreMapUninhib, dtype=np.uint8)
-        h = hashlib.sha256(arr.tobytes())
+        h = hashlib.sha256()
+        h.update(arr.data)       # memoryview — no copy
         h.update(struct.pack('>d', cellSize))
         return h.hexdigest()
 
@@ -955,12 +964,18 @@ class Fmm3DGrain(Grain):
     def generateCoreMap(self):
         """Generate an image of the grain cross section in self.coreMap. A 0 in the image means propellant, and a 1 means no propellant."""
 
-    def simulationSetup(self, config):
+    def simulationSetup(self, config, cancel_check=None, status_cb=None):
         self.mapDim = config.getProperty("3DmapDim")
         # mapLength = self.mapDim * np.ceil(self.lengthToMap(self.props['length'].getValue() + self.props['diameter'].getValue()) / self.lengthToMap(self.props['diameter'].getValue())).astype(int)
 
+        if status_cb:
+            status_cb("Voxelizing mesh\u2026")
         self.generateCoreMap()
-        self.generateRegressionMap()
+        if cancel_check and cancel_check():
+            raise _GrainSetupCanceled()
+        if status_cb:
+            status_cb("Computing distance field\u2026")
+        self.generateRegressionMap(cancel_check=cancel_check, status_cb=status_cb)
 
     @staticmethod
     def _makeCoreMapCacheKey(coreMap, inhibitedEnds, mapDim):
@@ -969,7 +984,7 @@ class Fmm3DGrain(Grain):
         v = coreMap.view(np.uint8)
         return (coreMap.shape, int(v.sum()), inhibitedEnds, mapDim)
 
-    def generateRegressionMap(self):
+    def generateRegressionMap(self, cancel_check=None, status_cb=None):
         """Uses the fast marching method to generate an image of how the grain regresses from the core map. The map
         is stored under self.regressionMap."""
 
@@ -1021,8 +1036,23 @@ class Fmm3DGrain(Grain):
         _fmm_key = self._computeFmmCacheKey(coreMapUninhib, cellSize)
         regressionMapUninhib = self._loadFmmCache(_fmm_key)
         if regressionMapUninhib is None:
-            regressionMapUninhib = skfmm.distance(coreMapUninhib, dx=cellSize) * 2
+            # Apply the cylinder mask so skfmm skips outside-cylinder voxels.
+            # This is the same pattern the 2-D PerforatedGrain path uses; without
+            # it the FMM propagates through ~21 % extra corner voxels and can't
+            # terminate early at the cylinder boundary.
+            _mask_full = np.ascontiguousarray(mask)
+            _masked_phi = np.ma.MaskedArray(coreMapUninhib, _mask_full)
+            _fmm_result = skfmm.distance(_masked_phi, dx=cellSize)
+            # Fill masked positions with max distance so marching-cubes never
+            # sees a spurious zero-crossing at the cylinder boundary.
+            _fill = max(float(_fmm_result.max()), 1.0)
+            regressionMapUninhib = _fmm_result.filled(_fill)
+            regressionMapUninhib *= 2           # in-place — avoids a full copy
+            del _mask_full, _masked_phi, _fmm_result
             self._saveFmmCache(_fmm_key, regressionMapUninhib)
+
+        if cancel_check and cancel_check():
+            raise _GrainSetupCanceled()
 
         # # FIXME:
         # plt.figure(figsize=(16,8))
@@ -1031,7 +1061,10 @@ class Fmm3DGrain(Grain):
         # plt.gca().set_aspect("equal")
         # plt.show()
 
-        maxDist = np.amax(regressionMapUninhib)
+        # Only consider non-masked (inside-cylinder) positions for maxDist;
+        # filled positions carry an artificial large value that would inflate
+        # wallWeb and break burnout detection.
+        maxDist = float(np.amax(regressionMapUninhib[valid]))
         self.wallWeb = self.unNormalize(maxDist)
 
         polled = []
@@ -1041,6 +1074,9 @@ class Fmm3DGrain(Grain):
             os.environ.get('OPENMOTOR_EXPERIMENTAL_MAX_MARCHING_LEVELS', '250')
         )
         numLevels = max(2, min(targetLevels, maxMarchingLevels))
+
+        if status_cb:
+            status_cb("Computing burning area\u2026")
 
         # Adaptive two-pass MC sweep: coarse uniform sample + curvature-driven
         # refinement.  Reduces MC evaluations by ~4–5× vs a uniform sweep of
@@ -1054,6 +1090,8 @@ class Fmm3DGrain(Grain):
         _coarse_pairs: list = []  # [(level, area_m2), ...]
         _first_failed_coarse: float | None = None
         for _lvl in _coarse_levels:
+            if cancel_check and cancel_check():
+                raise _GrainSetupCanceled()
             _ap = _marching_area_pixels(regressionMapUninhib, valid, _lvl)
             if _ap is None:
                 _first_failed_coarse = _lvl
@@ -1102,11 +1140,14 @@ class Fmm3DGrain(Grain):
                             ),
                             _fine_levels_sorted,
                         ))
+                    if cancel_check and cancel_check():
+                        raise _GrainSetupCanceled()
                 else:
-                    _raw_areas = [
-                        _marching_area_pixels(regressionMapUninhib, valid, lv)
-                        for lv in _fine_levels_sorted
-                    ]
+                    _raw_areas = []
+                    for lv in _fine_levels_sorted:
+                        if cancel_check and cancel_check():
+                            raise _GrainSetupCanceled()
+                        _raw_areas.append(_marching_area_pixels(regressionMapUninhib, valid, lv))
                 _fine_pairs = [
                     (lv, self.mapToArea(av))
                     for lv, av in zip(_fine_levels_sorted, _raw_areas)
@@ -1167,12 +1208,18 @@ class Fmm3DGrain(Grain):
         _aft_inhibited  = self.props['inhibitedEnds'].getValue() in ('Both', 'Bottom')
         _fore_inhibited = self.props['inhibitedEnds'].getValue() in ('Both', 'Top')
         if _HAS_FMM3D_CY and len(polled) >= 2:
+            if cancel_check and cancel_check():
+                raise _GrainSetupCanceled()
+            if status_cb:
+                status_cb("Building port area lookup\u2026")
             _zdim = self._regressionMapF64.shape[0]
             _scan_aft  = max(2, _zdim // 20)           # z = 0 .. _scan_aft-1
             _scan_fore = max(2, _zdim // 20)            # z = _zdim-_scan_fore .. _zdim-1
             _portCounts = [] if _aft_inhibited  else None
             _foreCounts = [] if _fore_inhibited else None
             for _lvl in polled:
+                if cancel_check and cancel_check():
+                    raise _GrainSetupCanceled()
                 if _aft_inhibited:
                     _best = 0
                     for _z in range(_scan_aft):

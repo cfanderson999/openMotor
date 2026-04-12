@@ -66,6 +66,14 @@ class custom3d(Fmm3DGrain):
         return oriented
 
     @staticmethod
+    def _getCrossSectionAxes(axisChoice):
+        """Return the two mesh-coordinate axis indices that form the cross-section."""
+        axisLetter = axisChoice[-1].upper()
+        meshAxisToIndex = {'X': 0, 'Y': 1, 'Z': 2}
+        lengthIdx = meshAxisToIndex.get(axisLetter, 1)
+        return [i for i in range(3) if i != lengthIdx]
+
+    @staticmethod
     def _getLengthExtent(bounds, axisChoice):
         """Return selected mesh-axis extent for total motor-length accounting."""
         axisLetter = axisChoice[-1].upper()
@@ -152,6 +160,40 @@ class custom3d(Fmm3DGrain):
         else:
             verts_m = np.array(self.vertices, dtype=np.float64) * convert(1, inUnit, 'm')
             faces_i = np.array(self.faces, dtype=np.int32)
+
+            # Centre the mesh cross-section on the origin BEFORE voxelization.
+            # We use the vertex centroid (mean) rather than the bounding-box
+            # midpoint because meshes with odd rotational symmetry (3-fin
+            # finocyl, 3-point star) have a bbox whose centre is offset from
+            # the bore's rotational axis.  The centroid of an N-fold symmetric
+            # vertex set always lies on the symmetry axis.
+            _csAxes = self._getCrossSectionAxes(coreAxis)
+            for _ax in _csAxes:
+                _mid = float(np.mean(verts_m[:, _ax]))
+                verts_m[:, _ax] -= _mid
+
+            # Symmetrize cross-section bounds so the voxel grid is centred on
+            # coordinate 0 (the bore axis).  After centroid centering the bbox
+            # can still be asymmetric (e.g. one fin extends further than the
+            # gap between the other two).  "Fence" vertices at ±max_extent
+            # force the grid to span a symmetric range without affecting
+            # ray-cast results (they are not referenced by any triangle).
+            _meshAxisToIdx = {'X': 0, 'Y': 1, 'Z': 2}
+            _lengthIdx = _meshAxisToIdx[coreAxis[-1].upper()]
+            _lmid = 0.5 * (float(verts_m[:, _lengthIdx].min()) +
+                            float(verts_m[:, _lengthIdx].max()))
+            _fences = []
+            for _ax in _csAxes:
+                _ext = max(abs(float(verts_m[:, _ax].min())),
+                           abs(float(verts_m[:, _ax].max())))
+                for _s in (-1.0, 1.0):
+                    _fv = np.zeros(3, dtype=np.float64)
+                    _fv[_lengthIdx] = _lmid
+                    _fv[_ax] = _s * _ext
+                    _fences.append(_fv)
+            if _fences:
+                verts_m = np.vstack([verts_m, np.array(_fences)])
+
             bounds = None
             coreArray = None
 
@@ -179,9 +221,8 @@ class custom3d(Fmm3DGrain):
                     self._lastVoxelFallbackReason = 'native path not selected'
 
             if coreArray is None or bounds is None:
-                # Fallback: PyVista.
-                mesh = pv.PolyData(self.vertices, np.insert(self.faces, 0, 3, axis=1))
-                mesh = mesh.scale(3 * [convert(1, inUnit, 'm')], inplace=False)
+                # Fallback: PyVista — use already-centred verts_m.
+                mesh = pv.PolyData(verts_m, np.insert(faces_i, 0, 3, axis=1))
 
                 try:
                     # Fast/strict path first for well-formed watertight meshes.
@@ -222,8 +263,6 @@ class custom3d(Fmm3DGrain):
 
         # The following code adds the endburner, if it exists, on top of the voxelized core and then afterwards 
         # manually pads values onto the core until its dims match the initGeometry coremap dims
-        # I really dont like this way of doing this, there is definitely a better solution, also if your
-        # voxelized core is an odd width and mapDim is even then it will be slightly off centered
 
         self.totalLength = FloatProperty('Length', 'm', 0, 10)
         self.totalLength.setValue(self.props['length'].getValue() + self._getLengthExtent(bounds, coreAxis))

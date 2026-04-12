@@ -6,6 +6,7 @@ from motorlib.simResult import singleValueChannels, multiValueChannels, alertLev
 from motorlib.constants import standardGravity
 
 from .grainImageWidget import GrainImageWidget
+from .grain3DViewerWidget import Grain3DViewerWidget
 
 from ..views.ResultsWidget_ui import Ui_ResultsWidget
 
@@ -44,6 +45,16 @@ class ResultsWidget(QWidget):
         self.grainImages = []
         self.grainLabels = []
 
+        # 3-D viewer tab (added programmatically so no .ui changes needed)
+        self._viewer3D = Grain3DViewerWidget(self)
+        self.ui.tabWidget.addTab(self._viewer3D, '3D Viewer')
+
+        # Sync: when the 3D viewer's local slider moves, drive the main slider
+        # (which in turn calls updateGrainTab → updates both tabs)
+        self._viewer3D._timeSlider.valueChanged.connect(
+            self._on3DViewerSliderMoved
+        )
+
     def setPreferences(self, pref):
         self.preferences = pref
         self.ui.widgetGraph.setPreferences(pref)
@@ -81,6 +92,9 @@ class ResultsWidget(QWidget):
                 self.ui.tableWidgetGrains.setCellWidget(1 + fid, gid, self.grainLabels[gid][field])
         self.updateGrainTab()
 
+        # Populate 3-D viewer with the new simulation result
+        self._viewer3D.showData(simResult)
+
         self.ui.tableWidgetAlerts.setRowCount(0) # Clear the table
         self.ui.tableWidgetAlerts.setRowCount(len(simResult.alerts))
         for row, alert in enumerate(simResult.alerts):
@@ -105,9 +119,18 @@ class ResultsWidget(QWidget):
         grains = self.ui.grainSelector.getSelectedGrains()
         self.ui.widgetGraph.showData(self.simResult, xCheck, yChecks, grains)
 
+    def showPreview(self, motor) -> None:
+        """Show the 3-D grain at t=0 after quick results are ready (before full sim)."""
+        self._viewer3D.showPreview(motor)
+
+    def _on3DViewerSliderMoved(self, value: int) -> None:
+        """When the 3D viewer's local slider changes, sync the main slider."""
+        self.ui.horizontalSliderTime.setValue(value)
+
     def updateGrainTab(self):
         if self.simResult is not None:
             index = self.ui.horizontalSliderTime.value()
+            self._viewer3D.updateRegression(self.simResult, index)
             for gid, grain in enumerate(self.simResult.motor.grains):
                 if self.grainImages[gid] is not None:
                     regDist = self.simResult.channels['regression'].getPoint(index)[gid]
@@ -163,6 +186,7 @@ class ResultsWidget(QWidget):
             del self.grainImageWidgets[-1]
             del self.grainImages[-1]
         self.ui.tableWidgetGrains.setColumnCount(0)
+        self._viewer3D.resetView()
         self.ui.labelTimeProgress.setText('-')
         self.ui.labelTimeRemaining.setText('-')
         self.ui.labelImpulseProgress.setText('-')

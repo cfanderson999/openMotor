@@ -12,7 +12,7 @@ from .nozzle import Nozzle
 from .propellant import Propellant
 from .properties import FloatProperty, IntProperty, PropertyCollection
 from .simResult import SimAlert, SimAlertLevel, SimAlertType, SimulationResult
-from .grain import Grain
+from .grain import Grain, _GrainSetupCanceled
 
 
 class MotorConfig(PropertyCollection):
@@ -463,7 +463,7 @@ class Motor:
 
         return simRes
 
-    def getQuickResults(self):
+    def getQuickResults(self, cancel_check=None, status_cb=None):
         results = {
             "volumeLoading": 0,
             "initialKn": 0,
@@ -484,12 +484,19 @@ class Motor:
 
         # Generate coremaps for perforated grains (must come before calcTotalVolume
         # so 3D grains have totalLength set)
-        for grain in self.grains:
-            for alert in grain.getGeometryErrors():
-                if alert.level == SimAlertLevel.ERROR:
-                    return results
+        from .grain import Fmm3DGrain
+        try:
+            for grain in self.grains:
+                for alert in grain.getGeometryErrors():
+                    if alert.level == SimAlertLevel.ERROR:
+                        return results
 
-            grain.simulationSetup(self.config)
+                if isinstance(grain, Fmm3DGrain):
+                    grain.simulationSetup(self.config, cancel_check=cancel_check, status_cb=status_cb)
+                else:
+                    grain.simulationSetup(self.config)
+        except _GrainSetupCanceled:
+            return results
 
         motorVolume = self.calcTotalVolume()
 

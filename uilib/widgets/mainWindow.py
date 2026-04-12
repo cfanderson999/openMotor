@@ -7,9 +7,13 @@ from PyQt6.QtCore import Qt, pyqtSignal
 import motorlib
 import uilib.widgets.aboutDialog
 from uilib.views.MainWindow_ui import Ui_MainWindow
+from .simulationProgressDialog import SimulationProgressDialog
+from motorlib.grain import Fmm3DGrain
 
 class Window(QMainWindow):
     _quickResultsReady = pyqtSignal(dict)
+    _fmmSetupStage = pyqtSignal(str)
+    _quick3DPreviewReady = pyqtSignal(object)  # carries the motor after simulationSetup
 
     def __init__(self, app):
         QMainWindow.__init__(self)
@@ -48,6 +52,14 @@ class Window(QMainWindow):
         self.app.toolManager.changeApplied.connect(self.postLoadUpdate)
 
         self._quickResultsReady.connect(self.showQuickResults)
+        self._quick3DPreviewReady.connect(self.ui.resultsWidget.showPreview)
+
+        self._quickResultsStopped = False
+        self._fmmProgDialog = SimulationProgressDialog()
+        self._fmmProgDialog.setWindowTitle('Preparing 3D grain')
+        self._fmmSetupStage.connect(self._fmmProgDialog.setLabel)
+        self._fmmProgDialog.simulationCanceled.connect(self._cancelFmmSetup)
+        self._quickResultsReady.connect(self._fmmProgDialog.hide)
 
         self.setupMotorStats()
         self.setupMotorEditor()
@@ -330,10 +342,29 @@ class Window(QMainWindow):
         self.ui.labelDeliveredThrustCoefficient.setText(self.formatMotorStat(simResult.getAdjustedThrustCoefficient(), ''))
 
     def getQuickResults(self, motor):
+        has3d = any(isinstance(g, Fmm3DGrain) for g in motor.grains)
+        self._quickResultsStopped = False
+        if has3d:
+            self._fmmProgDialog.show()
+            self._fmmProgDialog.setLabel("Preparing 3D grain\u2026")
+            self._fmmProgDialog.setIndeterminate(True)
+
         def _worker():
-            results = motor.getQuickResults()
+            if has3d:
+                def _status(text):
+                    self._fmmSetupStage.emit(text)
+                def _cancel_check():
+                    return self._quickResultsStopped
+                results = motor.getQuickResults(cancel_check=_cancel_check, status_cb=_status)
+            else:
+                results = motor.getQuickResults()
+            self._quick3DPreviewReady.emit(motor)
             self._quickResultsReady.emit(results)
+
         Thread(target=_worker).start()
+
+    def _cancelFmmSetup(self):
+        self._quickResultsStopped = True
 
     def showQuickResults(self, results):
         self.ui.labelVolumeLoading.setText('{:.2f}%'.format(results['volumeLoading']))

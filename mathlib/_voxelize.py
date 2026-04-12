@@ -122,10 +122,15 @@ def voxelize_mesh(vertices, faces, voxel_density):
 
     bounds = np.array([xmax - xmin, ymax - ymin, zmax - zmin])
 
-    # Build grid coordinates matching PyVista: arange(min, max, density).
-    x_coords = np.arange(xmin, xmax, density)
-    y_coords = np.arange(ymin, ymax, density)
-    z_coords = np.arange(zmin, zmax, density)
+    # Build cell-centred grid coordinates.  Offsetting by half a voxel ensures
+    # that no sample point ever coincides exactly with a flat mesh face (end
+    # caps, fin walls, etc.).  Without the offset, even-odd ray counting defers
+    # the boundary toggle to the *next* sample, flipping the inside flag for
+    # the layer sitting right on the surface — the classic "Z-fighting" effect.
+    half = density * 0.5
+    x_coords = np.arange(xmin + half, xmax, density)
+    y_coords = np.arange(ymin + half, ymax, density)
+    z_coords = np.arange(zmin + half, zmax, density)
 
     # Ensure at least one point per axis.
     if len(x_coords) == 0:
