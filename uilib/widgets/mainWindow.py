@@ -353,9 +353,9 @@ class Window(QMainWindow):
             if has3d:
                 def _status(text):
                     self._fmmSetupStage.emit(text)
-                def _cancel_check():
+                def _cancelCheck():
                     return self._quickResultsStopped
-                results = motor.getQuickResults(cancel_check=_cancel_check, status_cb=_status)
+                results = motor.getQuickResults(cancelCheck=_cancelCheck, statusCb=_status)
             else:
                 results = motor.getQuickResults()
             self._quick3DPreviewReady.emit(motor)
@@ -375,7 +375,8 @@ class Window(QMainWindow):
         )
         self.ui.labelPropellantDimensions.setText(propellantDimensionString)
         self.ui.labelPropellantMass.setText(self.formatMotorStat(results['propellantMass'], 'kg'))
-        self.ui.labelPortThroatRatio.setText(self.formatMotorStat(results['portRatio'], ''))
+        if results['portRatio'] is not None:
+            self.ui.labelPortThroatRatio.setText(self.formatMotorStat(results['portRatio'], ''))
 
     def runSimulation(self):
         self.resetOutput()

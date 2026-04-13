@@ -14,6 +14,6 @@ from .custom3d import *
 # Generate grain geometry name -> constructor lookup table
 grainTypes = {}
 grainClasses = [BatesGrain, EndBurningGrain, Finocyl, MoonBurner, StarGrain, XCore, CGrain, DGrain, RodTubeGrain,
-                ConicalGrain, CustomGrain, custom3d]
+                ConicalGrain, CustomGrain, Custom3DGrain]
 for grainType in grainClasses:
     grainTypes[grainType.geomName] = grainType

@@ -71,12 +71,11 @@ def _validate_and_prepare_mesh(vertices, faces, voxel_density):
 
 def voxelize_mesh(vertices, faces, voxel_density):
     """
-    Voxelize a closed triangle mesh at *voxel_density* spacing.
+    Voxelize a closed triangle mesh at *voxel_density* spacing using a parallel
+    ray-casting kernel in pure C / OpenMP.
 
-    Replicates PyVista's ``pv.voxelize_volume(mesh, density=voxel_density)``
-    + ``cell_data_to_point_data()`` pipeline but in pure C / OpenMP.
-
-    Grid construction matches PyVista exactly:
+    Grid construction and output orientation match those of the original
+    PyVista-based pipeline this replaced:
         coords = np.arange(bounds_min, bounds_max, voxel_density)
 
     Parameters
@@ -89,9 +88,8 @@ def voxelize_mesh(vertices, faces, voxel_density):
     -------
     coreArray : (nx, ny, nz) bool ndarray
         True where the grid point is **outside** (propellant), False where
-        inside the mesh bore.  Axes correspond to mesh X, Y, Z after the
-        same ``rot90(axes=(1,0))`` + ``logical_not`` that the original
-        PyVista path applied.
+        inside the mesh bore.  Axes correspond to mesh X, Y, Z after
+        ``rot90(axes=(1,0))`` + ``logical_not``.
     bounds : (3,) float64
         Mesh extent [dx, dy, dz] in metres (same as ``mesh.bounds`` extents).
 
@@ -160,7 +158,7 @@ def voxelize_mesh(vertices, faces, voxel_density):
     # Result: (nx, ny, nz) uint8 – 1 = inside mesh bore.
     inside = _voxelize_cy(verts, tris, x_coords, y_coords, z_coords)
 
-    # Post-processing to match the PyVista path (rot90 + logical_not), keeping
+    # Post-processing: apply rot90 + logical_not to match expected output orientation, keeping
     # peak allocation at 2× grid size instead of 3×:
     #  1. Flip 0↔1 in-place  (bore=1 → propellant=True, propellant=0 → bore=False)
     #     — avoids a separate logical_not copy.

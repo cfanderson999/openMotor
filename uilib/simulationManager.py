@@ -55,10 +55,10 @@ class SimulationManager(QObject):
 
     def _simThread(self, show, has3d):
         if has3d:
-            on_sim_start = lambda: self.simStage.emit("Running simulation\u2026", False)
+            onSimStart = lambda: self.simStage.emit("Running simulation\u2026", False)
         else:
-            on_sim_start = None
-        simRes = self.motor.runSimulation(self.updateProgressBar, onSimStart=on_sim_start)
+            onSimStart = None
+        simRes = self.motor.runSimulation(self.updateProgressBar, onSimStart=onSimStart)
         self.simulationDone.emit(simRes)
         if simRes.success and show:
             logger.log('Simulation succeeded')

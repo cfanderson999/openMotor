@@ -5,7 +5,7 @@ and motorlib.grains.custom3d.
 Covers gaps not addressed by the existing custom3d.py test file:
   - Bitpacked coreMap storage (pack/unpack roundtrip, sum precomputation)
   - FMM distance disk cache (save/load roundtrip, key determinism)
-  - _smooth_series adaptive window sizing
+  - _smoothSeries adaptive window sizing
   - _getMeshedPeakSearchCandidates with synthetic arrays
   - Bore grain with all inhibited-ends variants ('Top', 'Bottom', 'Neither')
   - 3D mass flux mode (massFlux3D=True)
@@ -22,8 +22,8 @@ import unittest
 import numpy as np
 
 import motorlib.grain
-from motorlib.grain import Fmm3DGrain, _smooth_series
-from motorlib.grains import custom3d as _custom3d_mod
+from motorlib.grain import Fmm3DGrain, _smoothSeries
+from motorlib.grains import Custom3DGrain
 
 
 # ---------------------------------------------------------------------------
@@ -54,16 +54,16 @@ def _make_bore_cylinder(radius=0.01, length=0.04, segments=16):
 
 
 class _MockConfig:
-    def __init__(self, map_dim_3d=48):
+    def __init__(self, map_dim_3d=100):
         self._props = {'3DmapDim': map_dim_3d, 'mapDim': 500}
 
     def getProperty(self, name):
         return self._props.get(name)
 
 
-def _make_bore_grain(inhibited='Both', massFlux3D=False, mapDim=48):
+def _make_bore_grain(inhibited='Both', massFlux3D=False, mapDim=100):
     faces, verts = _make_bore_cylinder(radius=0.01, length=0.04, segments=16)
-    g = _custom3d_mod()
+    g = Custom3DGrain()
     g.setProperties({
         'diameter':      0.05,
         'length':        0.0,
@@ -85,7 +85,7 @@ class TestBitpackedCoreMap(unittest.TestCase):
     """Test the Fmm3DGrain coreMap property getter/setter bitpacking."""
 
     def _make_grain(self):
-        return _custom3d_mod()
+        return Custom3DGrain()
 
     def test_small_array_stored_dense(self):
         """Arrays below _PACK_THRESHOLD_BYTES should remain dense (no packing)."""
@@ -142,7 +142,7 @@ class TestFmmDistanceCache(unittest.TestCase):
     """Tests for _computeFmmCacheKey, _saveFmmCache, _loadFmmCache."""
 
     def setUp(self):
-        self.grain = _custom3d_mod()
+        self.grain = Custom3DGrain()
 
     def test_cache_key_deterministic(self):
         arr = np.ones((8, 8, 8), dtype=np.uint8)
@@ -183,39 +183,39 @@ class TestFmmDistanceCache(unittest.TestCase):
 
 
 # ===========================================================================
-# 3. _smooth_series adaptive window
+# 3. _smoothSeries adaptive window
 # ===========================================================================
 
 class TestSmoothSeries(unittest.TestCase):
     """Tests for the adaptive Savitzky-Golay smoother."""
 
     def test_empty_array(self):
-        result = _smooth_series([])
+        result = _smoothSeries([])
         self.assertEqual(len(result), 0)
 
     def test_single_value(self):
-        result = _smooth_series([42.0])
+        result = _smoothSeries([42.0])
         np.testing.assert_array_almost_equal(result, [42.0])
 
     def test_two_values(self):
-        result = _smooth_series([1.0, 2.0])
+        result = _smoothSeries([1.0, 2.0])
         np.testing.assert_array_almost_equal(result, [1.0, 2.0])
 
     def test_short_series_does_not_crash(self):
         """A series of 5 elements should not raise (window must adapt)."""
-        result = _smooth_series([1, 2, 3, 2, 1])
+        result = _smoothSeries([1, 2, 3, 2, 1])
         self.assertEqual(len(result), 5)
 
     def test_long_constant_series_unchanged(self):
         """A flat series should remain flat after smoothing."""
         data = np.full(100, 5.0)
-        result = _smooth_series(data)
+        result = _smoothSeries(data)
         np.testing.assert_array_almost_equal(result, data, decimal=10)
 
     def test_output_length_matches_input(self):
         for n in [3, 10, 50, 200]:
             data = np.random.rand(n)
-            result = _smooth_series(data)
+            result = _smoothSeries(data)
             self.assertEqual(len(result), n)
 
 

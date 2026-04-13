@@ -1,17 +1,17 @@
 """3D Custom Grain submodule"""
 
-import pyvista as pv
-import numpy as np
 import hashlib
-import pickle
 import os
+import pickle
 from collections import OrderedDict
+
+import numpy as np
 
 try:
     from mathlib._voxelize import voxelize_mesh as _voxelize_mesh_cy
-    _HAS_VOXELIZE_CY = True
+    _hasVoxelizeCy = True
 except ImportError:
-    _HAS_VOXELIZE_CY = False
+    _hasVoxelizeCy = False
 
 from ..grain import Fmm3DGrain
 from ..properties import MeshProperty, EnumProperty, FloatProperty
@@ -19,12 +19,12 @@ from ..simResult import SimAlert, SimAlertLevel, SimAlertType
 from ..units import getAllConversions, convert
 
 
-def _env_enabled_default_true(name):
+def _envEnabledDefaultTrue(name):
     """Return True unless env var explicitly disables the feature."""
     raw = os.environ.get(name, '')
     return str(raw).strip().lower() not in ('0', 'false', 'no', 'off')
 
-class custom3d(Fmm3DGrain):
+class Custom3DGrain(Fmm3DGrain):
     """Custom grains can have any core shape. They define their geometry using a polygon property, which tracks a list
     of polygons that each consist of a number of points. The polygons are scaled according to user specified units and
     drawn onto the core map."""
@@ -101,7 +101,7 @@ class custom3d(Fmm3DGrain):
         digest = hashlib.sha256(facesArray.tobytes() + vertsArray.tobytes()).hexdigest()
         return ('raw', digest)
 
-    def hashCoreMapInputs(self):
+    def getCoreMapHash(self):
         mapDim = self.mapDim
         inUnit = self.props['stlUnit'].getValue()
         coreAxis = self.props['coreAxis'].getValue()
@@ -110,16 +110,10 @@ class custom3d(Fmm3DGrain):
         diameter = self.props['diameter'].getValue()
         length = self.props['length'].getValue()
 
-        byte_string = pickle.dumps([mapDim, inUnit, coreAxis, faces, vertices, diameter, length])
-        return hashlib.sha256(byte_string).hexdigest()
+        byteString = pickle.dumps([mapDim, inUnit, coreAxis, faces, vertices, diameter, length])
+        return hashlib.sha256(byteString).hexdigest()
 
     def generateCoreMap(self):
-        # newCoreMapHash = self.hashCoreMapInputs()
-        # if newCoreMapHash == self.coreMapHash:
-        #     return 0
-        # else:
-        #     self.coreMapHash = newCoreMapHash
-
         inUnit = self.props['stlUnit'].getValue()
         coreAxis = self.props['coreAxis'].getValue()
 
@@ -128,8 +122,10 @@ class custom3d(Fmm3DGrain):
         sourcePath = meshValue[2] if len(meshValue) > 2 else ''
 
         if len(self.faces) == 0 or len(self.vertices) == 0:
-            self.coreMap = np.ones((1, self.mapDim, self.mapDim), dtype=bool)
-            self.mapLength = 1
+            self.totalLength = FloatProperty('Length', 'm', 0, 10)
+            self.totalLength.setValue(self.props['length'].getValue())
+            self.mapLength = max(1, int(np.ceil(self.lengthToMap(self.totalLength.getValue()))))
+            self.coreMap = np.ones((self.mapLength, self.mapDim, self.mapDim), dtype=bool)
             _x2d, _y2d = np.meshgrid(
                 np.linspace(-1, 1, self.mapDim), np.linspace(-1, 1, self.mapDim), indexing='ij'
             )
@@ -138,8 +134,6 @@ class custom3d(Fmm3DGrain):
                 (self.mapLength, self.mapDim, self.mapDim),
             )
             self.mapX = self.mapY = self.mapZ = None
-            self.totalLength = FloatProperty('Length', 'm', 0, 10)
-            self.totalLength.setValue(self.props['length'].getValue())
             return
 
         voxelDensity = self.props['diameter'].getValue() / self.mapDim
@@ -158,8 +152,8 @@ class custom3d(Fmm3DGrain):
             self._lastVoxelBackend = 'cache'
             self._lastVoxelFallbackReason = ''
         else:
-            verts_m = np.array(self.vertices, dtype=np.float64) * convert(1, inUnit, 'm')
-            faces_i = np.array(self.faces, dtype=np.int32)
+            vertsM = np.array(self.vertices, dtype=np.float64) * convert(1, inUnit, 'm')
+            facesI = np.array(self.faces, dtype=np.int32)
 
             # Centre the mesh cross-section on the origin BEFORE voxelization.
             # We use the vertex centroid (mean) rather than the bounding-box
@@ -169,8 +163,8 @@ class custom3d(Fmm3DGrain):
             # vertex set always lies on the symmetry axis.
             _csAxes = self._getCrossSectionAxes(coreAxis)
             for _ax in _csAxes:
-                _mid = float(np.mean(verts_m[:, _ax]))
-                verts_m[:, _ax] -= _mid
+                _mid = float(np.mean(vertsM[:, _ax]))
+                vertsM[:, _ax] -= _mid
 
             # Symmetrize cross-section bounds so the voxel grid is centred on
             # coordinate 0 (the bore axis).  After centroid centering the bbox
@@ -180,82 +174,55 @@ class custom3d(Fmm3DGrain):
             # ray-cast results (they are not referenced by any triangle).
             _meshAxisToIdx = {'X': 0, 'Y': 1, 'Z': 2}
             _lengthIdx = _meshAxisToIdx[coreAxis[-1].upper()]
-            _lmid = 0.5 * (float(verts_m[:, _lengthIdx].min()) +
-                            float(verts_m[:, _lengthIdx].max()))
+            _lmid = 0.5 * (float(vertsM[:, _lengthIdx].min()) +
+                            float(vertsM[:, _lengthIdx].max()))
             _fences = []
             for _ax in _csAxes:
-                _ext = max(abs(float(verts_m[:, _ax].min())),
-                           abs(float(verts_m[:, _ax].max())))
+                _ext = max(abs(float(vertsM[:, _ax].min())),
+                           abs(float(vertsM[:, _ax].max())))
                 for _s in (-1.0, 1.0):
                     _fv = np.zeros(3, dtype=np.float64)
                     _fv[_lengthIdx] = _lmid
                     _fv[_ax] = _s * _ext
                     _fences.append(_fv)
             if _fences:
-                verts_m = np.vstack([verts_m, np.array(_fences)])
+                vertsM = np.vstack([vertsM, np.array(_fences)])
 
             bounds = None
             coreArray = None
 
+            if not _hasVoxelizeCy:
+                raise ImportError(
+                    'mathlib._voxelize_cy is required for 3D grains. '
+                    'Build extensions with: python setup.py build_ext --inplace'
+                )
+
             # Default-on for 3DFMM; set OPENMOTOR_EXPERIMENTAL_CY_VOXEL=0/false/no to opt out.
-            useCyVoxel = _env_enabled_default_true('OPENMOTOR_EXPERIMENTAL_CY_VOXEL')
+            useCyVoxel = _envEnabledDefaultTrue('OPENMOTOR_EXPERIMENTAL_CY_VOXEL')
 
-            if _HAS_VOXELIZE_CY and useCyVoxel:
-                try:
-                    # Fast Cython path: parallel ray-casting voxelizer.
-                    coreArray, bounds = _voxelize_mesh_cy(verts_m, faces_i, voxelDensity)
-                    self._lastVoxelBackend = 'cython'
-                    self._lastVoxelFallbackReason = ''
-                except Exception as exc:
-                    # Keep UI/simulation alive even on malformed meshes; fall back below.
-                    self._lastVoxelBackend = 'pyvista-fallback'
-                    self._lastVoxelFallbackReason = str(exc)
-                    print(f"[WARN] Native voxelizer failed; falling back to PyVista: {exc}")
-            else:
-                self._lastVoxelBackend = 'pyvista'
-                if not _HAS_VOXELIZE_CY:
-                    self._lastVoxelFallbackReason = 'mathlib._voxelize_cy unavailable'
-                elif not useCyVoxel:
-                    self._lastVoxelFallbackReason = 'disabled by OPENMOTOR_EXPERIMENTAL_CY_VOXEL'
+            if not useCyVoxel:
+                raise RuntimeError(
+                    'Native 3D voxelizer disabled by OPENMOTOR_EXPERIMENTAL_CY_VOXEL.'
+                )
+
+            try:
+                # Fast Cython path: parallel ray-casting voxelizer.
+                coreArray, bounds = _voxelize_mesh_cy(vertsM, facesI, voxelDensity)
+                self._lastVoxelBackend = 'cython'
+                self._lastVoxelFallbackReason = ''
+            except Exception as exc:
+                # Voxelization failed on a malformed mesh; create an empty core
+                # so geometry validation can report issues without crashing simulation setup.
+                print(f"[WARN] Native voxelizer failed; using empty core fallback: {exc}")
+                self._lastVoxelBackend = 'empty-fallback'
+                self._lastVoxelFallbackReason = str(exc)
+                coreArray = np.ones((1, self.mapDim, self.mapDim), dtype=bool)
+                if vertsM.size:
+                    mins = np.min(vertsM, axis=0)
+                    maxs = np.max(vertsM, axis=0)
+                    bounds = np.maximum(maxs - mins, 0.0)
                 else:
-                    self._lastVoxelFallbackReason = 'native path not selected'
-
-            if coreArray is None or bounds is None:
-                # Fallback: PyVista — use already-centred verts_m.
-                mesh = pv.PolyData(verts_m, np.insert(faces_i, 0, 3, axis=1))
-
-                try:
-                    # Fast/strict path first for well-formed watertight meshes.
-                    voxelized = pv.voxelize_volume(mesh.extract_surface(), density=voxelDensity)
-                except Exception:
-                    # Relax surface checks for imperfect/partial meshes.
-                    voxelized = pv.voxelize_volume(
-                        mesh.extract_surface(), density=voxelDensity, check_surface=False
-                    )
-
-                try:
-                    x, _y, _z = voxelized.meshgrid
-                    voxelized = voxelized.cell_data_to_point_data()
-
-                    coreArray = np.array(voxelized.point_data["InsideMesh"]).reshape(x.shape, order='F') > 0.5
-                    coreArray = np.rot90(coreArray, axes=(1, 0))
-                    coreArray = np.logical_not(coreArray)
-
-                    bounds = np.array(mesh.bounds)
-                    bounds = bounds[1::2] - bounds[::2]
-                except Exception as exc:
-                    # Last-resort fail-safe for invalid core geometry: create an empty core
-                    # so geometry validation can report issues without crashing simulation setup.
-                    print(f"[WARN] PyVista voxelization failed; using empty core fallback: {exc}")
-                    self._lastVoxelBackend = 'empty-fallback'
-                    self._lastVoxelFallbackReason = str(exc)
-                    coreArray = np.ones((1, self.mapDim, self.mapDim), dtype=bool)
-                    if verts_m.size:
-                        mins = np.min(verts_m, axis=0)
-                        maxs = np.max(verts_m, axis=0)
-                        bounds = np.maximum(maxs - mins, 0.0)
-                    else:
-                        bounds = np.zeros(3, dtype=float)
+                    bounds = np.zeros(3, dtype=float)
 
             self._rememberVoxelCache(cacheKey, (coreArray.copy(), bounds.copy()))
 
@@ -290,10 +257,10 @@ class custom3d(Fmm3DGrain):
         for _i in range(1, 3):   # axis 0 (length) is handled by padding below
             _excess = int(coreArray.shape[_i]) - int(coreBlankShape[_i])
             if _excess > 0:
-                _trim_fore = _excess // 2
-                _trim_aft  = _excess - _trim_fore
+                _trimFore = _excess // 2
+                _trimAft  = _excess - _trimFore
                 _sl = [slice(None)] * 3
-                _sl[_i] = slice(_trim_fore, coreArray.shape[_i] - _trim_aft if _trim_aft > 0 else None)
+                _sl[_i] = slice(_trimFore, coreArray.shape[_i] - _trimAft if _trimAft > 0 else None)
                 coreArray = coreArray[tuple(_sl)]
         # Clip axis 0 from the end if still oversized (should not normally occur).
         if coreArray.shape[0] > coreBlankShape[0]:
@@ -334,16 +301,16 @@ class custom3d(Fmm3DGrain):
     def getGeometryErrors(self):
         errors = super().getGeometryErrors()
 
-        if not _HAS_VOXELIZE_CY:
+        if not _hasVoxelizeCy:
             errors.append(
                 SimAlert(
-                    SimAlertLevel.WARNING,
+                    SimAlertLevel.ERROR,
                     SimAlertType.VALUE,
-                    'Native 3D voxelizer unavailable; GUI will use slower PyVista fallback. '
+                    'Native 3D voxelizer unavailable; 3D grains cannot be simulated. '
                     'Build extensions with: python setup.py build_ext --inplace',
                 )
             )
-        elif not _env_enabled_default_true('OPENMOTOR_EXPERIMENTAL_CY_VOXEL'):
+        elif not _envEnabledDefaultTrue('OPENMOTOR_EXPERIMENTAL_CY_VOXEL'):
             errors.append(
                 SimAlert(
                     SimAlertLevel.WARNING,

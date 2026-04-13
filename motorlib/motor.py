@@ -463,7 +463,7 @@ class Motor:
 
         return simRes
 
-    def getQuickResults(self, cancel_check=None, status_cb=None):
+    def getQuickResults(self, cancelCheck=None, statusCb=None):
         results = {
             "volumeLoading": 0,
             "initialKn": 0,
@@ -492,7 +492,7 @@ class Motor:
                         return results
 
                 if isinstance(grain, Fmm3DGrain):
-                    grain.simulationSetup(self.config, cancel_check=cancel_check, status_cb=status_cb)
+                    grain.simulationSetup(self.config, cancelCheck=cancelCheck, statusCb=statusCb)
                 else:
                     grain.simulationSetup(self.config)
         except _GrainSetupCanceled:

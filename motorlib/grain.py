@@ -22,33 +22,29 @@ import mathlib
 try:
     from mathlib._fmm3d import (
         get_first_last_prop_indices,
-        get_first_port_core_count,
         get_volume_count_gt_threshold,
         get_volume_count_gt_threshold_from_z,
         get_core_area_count_at_slice,
         get_core_area_profile,
         get_massflux_slice_suffix_arrays,
     )
-    _HAS_FMM3D_CY = True
+    _hasFmm3dCy = True
 except ImportError:
-    _HAS_FMM3D_CY = False
+    _hasFmm3dCy = False
 
 try:
-    from mathlib._march import marching_area_pixels as _marching_area_pixels_cy
-    _HAS_MARCH_CY = True
+    from mathlib._march import marching_area_pixels as _marchingAreaPixelsCy
+    _hasMarchCy = True
 except ImportError:
-    _HAS_MARCH_CY = False
-
-import trimesh
+    _hasMarchCy = False
 
 from . import geometry
 from .properties import EnumProperty, FloatProperty, BooleanProperty, PropertyCollection
 from .simResult import SimAlert, SimAlertLevel, SimAlertType
 from .constants import maximumRefDiameter, maximumRefLength
-from .units import convert
 
 
-def _smooth_series(values, window: int = 31, poly: int = 5) -> np.ndarray:
+def _smoothSeries(values, window: int = 31, poly: int = 5) -> np.ndarray:
     """Apply Savitzky-Golay smoothing with safe parameters for short arrays.
 
     The default window=31/poly=5 is tuned for dense sweeps (≥100 levels).
@@ -67,8 +63,8 @@ def _smooth_series(values, window: int = 31, poly: int = 5) -> np.ndarray:
         return arr
 
     # Adaptive window: target ~40% of series length, capped at caller default.
-    target_win = max(5, int(round(count * 0.4)))
-    win = min(window, target_win, count)
+    targetWin = max(5, int(round(count * 0.4)))
+    win = min(window, targetWin, count)
     # Must be odd for savgol_filter.
     if win % 2 == 0:
         win -= 1
@@ -76,29 +72,29 @@ def _smooth_series(values, window: int = 31, poly: int = 5) -> np.ndarray:
         return arr
 
     # Scale polynomial order proportionally; keep it in [1, win-1].
-    adaptive_poly = max(1, min(poly, int(round(poly * win / window)), win - 1))
+    adaptivePoly = max(1, min(poly, int(round(poly * win / window)), win - 1))
 
-    return savgol_filter(arr, win, adaptive_poly)
+    return savgol_filter(arr, win, adaptivePoly)
 
 
-def _marching_area_pixels(regression_map: np.ndarray, valid_mask: np.ndarray, level: float):
+def _marchingAreaPixels(regressionMap: np.ndarray, validMask: np.ndarray, level: float):
     """Return surface area in map-space pixels for a marching-cubes iso-level, or None on failure."""
     try:
         verts, faces, _, _ = measure.marching_cubes(
-            regression_map, level=level, mask=valid_mask
+            regressionMap, level=level, mask=validMask
         )
     except (RuntimeError, ValueError):
         return None
     return measure.mesh_surface_area(verts, faces)
 
 
-if _HAS_MARCH_CY:
-    _marching_area_pixels = _marching_area_pixels_cy
+if _hasMarchCy:
+    _marchingAreaPixels = _marchingAreaPixelsCy
 
 
 class _GrainSetupCanceled(Exception):
     """Raised when a grain setup operation (voxelization / regression map build)
-    is aborted by the user via a cancel_check callback."""
+    is aborted by the user via a cancelCheck callback."""
 
 
 class Grain(PropertyCollection):
@@ -504,7 +500,7 @@ class FmmGrain(PerforatedGrain):
                     )
                 )
             )
-        self.faceArea = _smooth_series(faceArea)
+        self.faceArea = _smoothSeries(faceArea)
         self.faceAreaFunc = interpolate.interp1d(polled, self.faceArea)
 
     def getCorePerimeter(self, regDist: float) -> float:
@@ -569,7 +565,7 @@ class FmmGrain(PerforatedGrain):
 class Fmm3DGrain(Grain):
     """A grain that uses a 3D version of the fast marching method to calculate its regression. All a subclass has to do
     is provide an implementation of generateCoreMap that makes a 3D model of the grain and core."""
-    geomName = '3dFmmGrain'
+    geomName = None
 
     # ---- FMM distance-field disk cache -----------------------------------
     # skfmm.distance() on a 128³ grid takes 2–10 s; a disk cache eliminates
@@ -781,7 +777,7 @@ class Fmm3DGrain(Grain):
         that look like interior local minima in the run-end profile, but these are aliasing
         artefacts — a position with core area V can only beat a narrower position with area M
         if V/M < (cumulative burn ratio), which is impossible for V >> M.  The threshold
-        filter `V ≤ global_min · pct_threshold` discards these artefacts automatically.
+        filter `V ≤ global_min · pctThreshold` discards these artefacts automatically.
 
         Algorithm:
           1. Compute core_area_profile (parallelised O(n²·z) Cython scan, <1 ms).
@@ -801,7 +797,7 @@ class Fmm3DGrain(Grain):
         if count <= 6:
             return list(range(startPos, endPos + 1))
 
-        if not _HAS_FMM3D_CY:
+        if not _hasFmm3dCy:
             return list(range(startPos, endPos + 1))
 
         mapDist = self.normalize(regDist)
@@ -812,142 +808,142 @@ class Fmm3DGrain(Grain):
         # Quantise mapDist to 6 decimal places so floating-point rounding across
         # consecutive timesteps that land at the same physical regression depth
         # reuses the cached profile instead of recomputing.
-        _mapDist_q = round(float(mapDist), 6)
-        _cap_key = (_mapDist_q, startPos, endPos)
-        core_counts = self._capCache.get(_cap_key)
-        if core_counts is None:
-            core_counts = get_core_area_profile(regressionMap, maskU8, mapDist, startPos, endPos)
-            self._capCache[_cap_key] = core_counts
-            self._capCache.move_to_end(_cap_key)
+        _mapDistQ = round(float(mapDist), 6)
+        _capKey = (_mapDistQ, startPos, endPos)
+        coreCounts = self._capCache.get(_capKey)
+        if coreCounts is None:
+            coreCounts = get_core_area_profile(regressionMap, maskU8, mapDist, startPos, endPos)
+            self._capCache[_capKey] = coreCounts
+            self._capCache.move_to_end(_capKey)
             if len(self._capCache) > self._capCacheMax:
                 self._capCache.popitem(last=False)
 
-        if len(core_counts) == 0:
+        if len(coreCounts) == 0:
             return list(range(startPos, endPos + 1))
 
-        min_core = int(np.min(core_counts))
-        if min_core == 0:
+        minCore = int(np.min(coreCounts))
+        if minCore == 0:
             # Some z-slices have zero core count.  Distinguish two cases:
             #   (a) Burned-through: interior slices have zero area (grain is fully
             #       consumed at that cross-section) → fall back to brute-force all.
             #   (b) Fore-cap not yet penetrated: zeros appear only at the fore end of
             #       the profile because the bore hasn't reached those slices yet.
             #       In this case trim the zero-tail and continue normally.
-            nonzero_idxs = np.nonzero(core_counts)[0]
-            if len(nonzero_idxs) == 0:
+            nonzeroIdxs = np.nonzero(coreCounts)[0]
+            if len(nonzeroIdxs) == 0:
                 return list(range(startPos, endPos + 1))
-            last_nonzero_i = int(nonzero_idxs[-1])
-            first_zero_i   = int(np.argmax(core_counts == 0))
-            if first_zero_i <= last_nonzero_i:
+            lastNonzeroI = int(nonzeroIdxs[-1])
+            firstZeroI   = int(np.argmax(coreCounts == 0))
+            if firstZeroI <= lastNonzeroI:
                 # Zero appears before the last non-zero → interior burnthrough
                 return list(range(startPos, endPos + 1))
             # Zeros are strictly at the fore end: trim the zero tail
-            core_counts = core_counts[:last_nonzero_i + 1]
+            coreCounts = coreCounts[:lastNonzeroI + 1]
 
-        n = len(core_counts)
+        n = len(coreCounts)
 
         # Detect and remove fore-cap breakthrough transition.
         # When the bore approaches the inhibited fore face, the voxelised core area
         # tapers from the interior value down to near zero over many slices.  Including
-        # those positions makes them the min_core, collapsing the candidate threshold so
+        # those positions makes them the minCore, collapsing the candidate threshold so
         # only the tiny-bore cap slices are selected — causing astronomical flux spikes.
         #
         # Detection strategy: find the interior peak cc (median of middle 50%), then
         # scan from the fore end inward until we find the first slice that exceeds 40%
         # of that peak — everything strictly fore of that is considered the fore-cap
-        # transition zone and excluded from both min_core and threshold candidates.
+        # transition zone and excluded from both minCore and threshold candidates.
         # This handles both sudden (>80%) and gradual multi-slice tapering.
         _mid_lo = n // 4
         _mid_hi = 3 * n // 4
         if _mid_hi > _mid_lo:
-            _interior_peak = float(np.max(core_counts[_mid_lo:_mid_hi]))
+            _interiorPeak = float(np.max(coreCounts[_mid_lo:_mid_hi]))
         else:
-            _interior_peak = float(np.max(core_counts)) if n > 0 else 0.0
-        _bore_thresh = 0.4 * _interior_peak
+            _interiorPeak = float(np.max(coreCounts)) if n > 0 else 0.0
+        _boreThresh = 0.4 * _interiorPeak
 
-        bore_end_n = n
-        if _interior_peak > 0:
+        boreEndN = n
+        if _interiorPeak > 0:
             for _ci in range(n - 1, -1, -1):
-                if core_counts[_ci] >= _bore_thresh:
-                    bore_end_n = _ci + 1  # exclusive: keep indices 0.._ci
+                if coreCounts[_ci] >= _boreThresh:
+                    boreEndN = _ci + 1  # exclusive: keep indices 0.._ci
                     break
 
         quality = self.props['meshedMassFluxQuality'].getValue()
 
         # Collapse each constant-area run to its foremost (last) slice.
         # Within a run, flux is strictly increasing, so only the last slice can be peak.
-        run_ends = []   # local indices (0-based from startPos)
+        runEnds = []   # local indices (0-based from startPos)
         for i in range(n):
-            if i == n - 1 or core_counts[i] != core_counts[i + 1]:
-                run_ends.append(i)
+            if i == n - 1 or coreCounts[i] != coreCounts[i + 1]:
+                runEnds.append(i)
 
-        # If a cap transition was found, restrict run_ends, core_counts, and n to
-        # the established bore region (aft of bore_end_n).
-        _endPos_capped = endPos  # endPos for unconditional candidate (may be adjusted)
-        if bore_end_n < n:
-            established_run_ends = [i for i in run_ends if i < bore_end_n]
-            if established_run_ends:
-                run_ends = established_run_ends
-                core_counts = core_counts[:bore_end_n]
-                n = bore_end_n
+        # If a cap transition was found, restrict runEnds, coreCounts, and n to
+        # the established bore region (aft of boreEndN).
+        _endPosCapped = endPos  # endPos for unconditional candidate (may be adjusted)
+        if boreEndN < n:
+            establishedRunEnds = [i for i in runEnds if i < boreEndN]
+            if establishedRunEnds:
+                runEnds = establishedRunEnds
+                coreCounts = coreCounts[:boreEndN]
+                n = boreEndN
                 # Cap endPos for unconditional inclusion so it stays in the established zone
-                _endPos_capped = startPos + bore_end_n - 1
+                _endPosCapped = startPos + boreEndN - 1
 
-        min_core = int(np.min(core_counts)) if len(core_counts) > 0 else 0
+        minCore = int(np.min(coreCounts)) if len(coreCounts) > 0 else 0
 
-        if min_core == 0:
+        if minCore == 0:
             return list(range(startPos, endPos + 1))
 
         # Both physical grain boundaries are unconditional candidates:
         #   startPos (aft/nozzle-side) – also run-end of first run
-        #   _endPos_capped (fore, trimmed to established-bore zone if transition found)
-        candidates = {startPos, _endPos_capped}
+        #   _endPosCapped (fore, trimmed to established-bore zone if transition found)
+        candidates = {startPos, _endPosCapped}
 
         if quality == 'Faster':
             # Grain ends ± 3 + smallest-area run-end ± 1 (covers the flux peak in
             # uniform grains where the dominant run ends well before endPos)
-            min_run_end_idx = min(run_ends, key=lambda i: core_counts[i])
+            minRunEndIdx = min(runEnds, key=lambda i: coreCounts[i])
             for d in range(1, 4):
-                if startPos + d <= _endPos_capped:
+                if startPos + d <= _endPosCapped:
                     candidates.add(startPos + d)
-                if _endPos_capped - d >= startPos:
-                    candidates.add(_endPos_capped - d)
+                if _endPosCapped - d >= startPos:
+                    candidates.add(_endPosCapped - d)
             for d in range(-1, 2):
-                pos = startPos + min_run_end_idx + d
-                if startPos <= pos <= _endPos_capped:
+                pos = startPos + minRunEndIdx + d
+                if startPos <= pos <= _endPosCapped:
                     candidates.add(pos)
             return sorted(candidates)
 
         # Fast: within 35% of min + local minima ±1
         # Exact: within 20% of min + local minima ±2
-        pct_threshold = 1.35 if quality == 'Fast' else 1.20
+        pctThreshold = 1.35 if quality == 'Fast' else 1.20
         nbr = 1 if quality == 'Fast' else 2
-        core_threshold = min_core * pct_threshold
-        min_idx = int(np.argmin(core_counts))
+        coreThreshold = minCore * pctThreshold
+        minIdx = int(np.argmin(coreCounts))
 
         # All run-ends with core area within the threshold
-        for i in run_ends:
-            if core_counts[i] <= core_threshold:
+        for i in runEnds:
+            if coreCounts[i] <= coreThreshold:
                 candidates.add(startPos + i)
 
         # Local minima among run-ends that are also within the area threshold.
         # This excludes voxelization-aliasing artefacts on monotone profiles (e.g. conical):
         # a local dip at 2× the global-min core area cannot be the flux peak because any
         # position with half the port area has a proportionally higher flux denominator.
-        re_vals = [core_counts[i] for i in run_ends]
-        m = len(re_vals)
+        reVals = [coreCounts[i] for i in runEnds]
+        m = len(reVals)
         for k in range(1, m - 1):
-            if (re_vals[k] <= re_vals[k - 1] and re_vals[k] <= re_vals[k + 1]
-                    and re_vals[k] <= core_threshold):
+            if (reVals[k] <= reVals[k - 1] and reVals[k] <= reVals[k + 1]
+                    and reVals[k] <= coreThreshold):
                 for d in range(-nbr, nbr + 1):
-                    pos = startPos + run_ends[k] + d
-                    if startPos <= pos <= _endPos_capped:
+                    pos = startPos + runEnds[k] + d
+                    if startPos <= pos <= _endPosCapped:
                         candidates.add(pos)
 
         # Always include the global core-area minimum with its neighbourhood
         for d in range(-nbr, nbr + 1):
-            pos = startPos + min_idx + d
-            if startPos <= pos <= _endPos_capped:
+            pos = startPos + minIdx + d
+            if startPos <= pos <= _endPosCapped:
                 candidates.add(pos)
 
         return sorted(candidates)
@@ -964,18 +960,18 @@ class Fmm3DGrain(Grain):
     def generateCoreMap(self):
         """Generate an image of the grain cross section in self.coreMap. A 0 in the image means propellant, and a 1 means no propellant."""
 
-    def simulationSetup(self, config, cancel_check=None, status_cb=None):
+    def simulationSetup(self, config, cancelCheck=None, statusCb=None):
         self.mapDim = config.getProperty("3DmapDim")
         # mapLength = self.mapDim * np.ceil(self.lengthToMap(self.props['length'].getValue() + self.props['diameter'].getValue()) / self.lengthToMap(self.props['diameter'].getValue())).astype(int)
 
-        if status_cb:
-            status_cb("Voxelizing mesh\u2026")
+        if statusCb:
+            statusCb("Voxelizing mesh\u2026")
         self.generateCoreMap()
-        if cancel_check and cancel_check():
+        if cancelCheck and cancelCheck():
             raise _GrainSetupCanceled()
-        if status_cb:
-            status_cb("Computing distance field\u2026")
-        self.generateRegressionMap(cancel_check=cancel_check, status_cb=status_cb)
+        if statusCb:
+            statusCb("Computing distance field\u2026")
+        self.generateRegressionMap(cancelCheck=cancelCheck, statusCb=statusCb)
 
     @staticmethod
     def _makeCoreMapCacheKey(coreMap, inhibitedEnds, mapDim):
@@ -984,7 +980,7 @@ class Fmm3DGrain(Grain):
         v = coreMap.view(np.uint8)
         return (coreMap.shape, int(v.sum()), inhibitedEnds, mapDim)
 
-    def generateRegressionMap(self, cancel_check=None, status_cb=None):
+    def generateRegressionMap(self, cancelCheck=None, statusCb=None):
         """Uses the fast marching method to generate an image of how the grain regresses from the core map. The map
         is stored under self.regressionMap."""
 
@@ -1011,18 +1007,18 @@ class Fmm3DGrain(Grain):
         # length to the total grain length. Should probably rework how initGeometry, generateCoreMap, and generateRegressionMap
         # work for the Fmm3DGrain as they make less sense in this context
         mask = self.mask
-        # uninhibited_disk must match the coreMap cross-section exactly.
+        # uninhibitedDisk must match the coreMap cross-section exactly.
         # Normally shape[1] == shape[2] == mapDim, but if the STL's long axis
         # doesn't match coreAxis the dims can differ; use the actual shape so
         # np.insert/append don't raise a broadcast error.
         _cm_ydim = _coreMap.shape[1]
         _cm_xdim = _coreMap.shape[2]
-        uninhibited_disk = np.zeros((1, _cm_ydim, _cm_xdim))
+        uninhibitedDisk = np.zeros((1, _cm_ydim, _cm_xdim))
         coreMapUninhib = _coreMap
         if self.props['inhibitedEnds'].getValue() in ['Top', 'Neither']:# BOTTOM
-            coreMapUninhib = np.insert(coreMapUninhib, 0, uninhibited_disk, axis=0)
+            coreMapUninhib = np.insert(coreMapUninhib, 0, uninhibitedDisk, axis=0)
         if self.props['inhibitedEnds'].getValue() in ['Bottom', 'Neither']:# TOP
-            coreMapUninhib = np.append(coreMapUninhib, uninhibited_disk, axis=0)
+            coreMapUninhib = np.append(coreMapUninhib, uninhibitedDisk, axis=0)
         if self.props['inhibitedEnds'].getValue() != 'Both':
             _xm, _ym = np.meshgrid(
                 np.linspace(-1, 1, _cm_ydim), np.linspace(-1, 1, _cm_xdim), indexing='ij'
@@ -1033,25 +1029,25 @@ class Fmm3DGrain(Grain):
         valid = np.logical_not(mask)
 
         cellSize = 1 / self.mapDim
-        _fmm_key = self._computeFmmCacheKey(coreMapUninhib, cellSize)
-        regressionMapUninhib = self._loadFmmCache(_fmm_key)
+        _fmmKey = self._computeFmmCacheKey(coreMapUninhib, cellSize)
+        regressionMapUninhib = self._loadFmmCache(_fmmKey)
         if regressionMapUninhib is None:
             # Apply the cylinder mask so skfmm skips outside-cylinder voxels.
             # This is the same pattern the 2-D PerforatedGrain path uses; without
             # it the FMM propagates through ~21 % extra corner voxels and can't
             # terminate early at the cylinder boundary.
-            _mask_full = np.ascontiguousarray(mask)
-            _masked_phi = np.ma.MaskedArray(coreMapUninhib, _mask_full)
-            _fmm_result = skfmm.distance(_masked_phi, dx=cellSize)
+            _maskFull = np.ascontiguousarray(mask)
+            _maskedPhi = np.ma.MaskedArray(coreMapUninhib, _maskFull)
+            _fmmResult = skfmm.distance(_maskedPhi, dx=cellSize)
             # Fill masked positions with max distance so marching-cubes never
             # sees a spurious zero-crossing at the cylinder boundary.
-            _fill = max(float(_fmm_result.max()), 1.0)
-            regressionMapUninhib = _fmm_result.filled(_fill)
+            _fill = max(float(_fmmResult.max()), 1.0)
+            regressionMapUninhib = _fmmResult.filled(_fill)
             regressionMapUninhib *= 2           # in-place — avoids a full copy
-            del _mask_full, _masked_phi, _fmm_result
-            self._saveFmmCache(_fmm_key, regressionMapUninhib)
+            del _maskFull, _maskedPhi, _fmmResult
+            self._saveFmmCache(_fmmKey, regressionMapUninhib)
 
-        if cancel_check and cancel_check():
+        if cancelCheck and cancelCheck():
             raise _GrainSetupCanceled()
 
         # # FIXME:
@@ -1075,56 +1071,56 @@ class Fmm3DGrain(Grain):
         )
         numLevels = max(2, min(targetLevels, maxMarchingLevels))
 
-        if status_cb:
-            status_cb("Computing burning area\u2026")
+        if statusCb:
+            statusCb("Computing burning area\u2026")
 
         # Adaptive two-pass MC sweep: coarse uniform sample + curvature-driven
         # refinement.  Reduces MC evaluations by ~4–5× vs a uniform sweep of
         # numLevels points while preserving interpolation accuracy on smooth
         # burning-area curves.  High-curvature intervals (rapid area change) get
         # extra mid-points; flat intervals are left at coarse resolution.
-        _N_COARSE = max(2, min(20, numLevels))
-        _coarse_levels = np.linspace(0.0, maxDist, _N_COARSE, endpoint=False).tolist()
+        _nCoarse = max(2, min(20, numLevels))
+        _coarseLevels = np.linspace(0.0, maxDist, _nCoarse, endpoint=False).tolist()
 
         # --- Coarse pass (sequential — only ~20 calls, minimal overhead) ---
-        _coarse_pairs: list = []  # [(level, area_m2), ...]
-        _first_failed_coarse: float | None = None
-        for _lvl in _coarse_levels:
-            if cancel_check and cancel_check():
+        _coarsePairs: list = []  # [(level, area_m2), ...]
+        _firstFailedCoarse: float | None = None
+        for _lvl in _coarseLevels:
+            if cancelCheck and cancelCheck():
                 raise _GrainSetupCanceled()
-            _ap = _marching_area_pixels(regressionMapUninhib, valid, _lvl)
+            _ap = _marchingAreaPixels(regressionMapUninhib, valid, _lvl)
             if _ap is None:
-                _first_failed_coarse = _lvl
+                _firstFailedCoarse = _lvl
                 break
-            _coarse_pairs.append((_lvl, self.mapToArea(_ap)))
+            _coarsePairs.append((_lvl, self.mapToArea(_ap)))
 
         # --- Refinement pass: bisect intervals with high normalised curvature ---
-        _fine_pairs: list = []
-        if numLevels > _N_COARSE and len(_coarse_pairs) >= 3:
-            _clvls  = np.array([p[0] for p in _coarse_pairs])
-            _careas = np.array([p[1] for p in _coarse_pairs])
-            _area_range = max(float(_careas.max() - _careas.min()), 1e-30)
+        _finePairs: list = []
+        if numLevels > _nCoarse and len(_coarsePairs) >= 3:
+            _clvls  = np.array([p[0] for p in _coarsePairs])
+            _careas = np.array([p[1] for p in _coarsePairs])
+            _areaRange = max(float(_careas.max() - _careas.min()), 1e-30)
             # Normalised second difference: proxy for |d²A/dr²| over each triplet.
-            _d2 = np.abs(np.diff(_careas, n=2)) / _area_range
-            _curv_thresh = float(
+            _d2 = np.abs(np.diff(_careas, n=2)) / _areaRange
+            _curvThresh = float(
                 os.environ.get('OPENMOTOR_ADAPTIVE_MARCH_THRESHOLD', '0.05')
             )
-            _budget = numLevels - len(_coarse_pairs)
-            _fine_set: set = set()
+            _budget = numLevels - len(_coarsePairs)
+            _fineSet: set = set()
             for _i, _c in enumerate(_d2):
-                if _c > _curv_thresh:
-                    _fine_set.add((_clvls[_i]     + _clvls[_i + 1]) / 2.0)
-                    _fine_set.add((_clvls[_i + 1] + _clvls[_i + 2]) / 2.0)
-            _fine_levels_sorted = sorted(_fine_set)[:_budget]
+                if _c > _curvThresh:
+                    _fineSet.add((_clvls[_i]     + _clvls[_i + 1]) / 2.0)
+                    _fineSet.add((_clvls[_i + 1] + _clvls[_i + 2]) / 2.0)
+            _fineLevelsSorted = sorted(_fineSet)[:_budget]
 
-            if _fine_levels_sorted:
-                _fine_parallel = (
+            if _fineLevelsSorted:
+                _fineParallel = (
                     os.environ.get(
                         'OPENMOTOR_EXPERIMENTAL_PARALLEL_SWEEP', ''
                     ).lower() in ('1', 'true', 'yes')
-                    or len(_fine_levels_sorted) > 10
+                    or len(_fineLevelsSorted) > 10
                 )
-                if _fine_parallel and len(_fine_levels_sorted) > 4:
+                if _fineParallel and len(_fineLevelsSorted) > 4:
                     from concurrent.futures import ThreadPoolExecutor
                     _workers = int(
                         os.environ.get(
@@ -1134,28 +1130,28 @@ class Fmm3DGrain(Grain):
                     if _workers <= 0:
                         _workers = os.cpu_count() or 1
                     with ThreadPoolExecutor(max_workers=_workers) as _exec:
-                        _raw_areas = list(_exec.map(
-                            lambda lv: _marching_area_pixels(
+                        _rawAreas = list(_exec.map(
+                            lambda lv: _marchingAreaPixels(
                                 regressionMapUninhib, valid, lv
                             ),
-                            _fine_levels_sorted,
+                            _fineLevelsSorted,
                         ))
-                    if cancel_check and cancel_check():
+                    if cancelCheck and cancelCheck():
                         raise _GrainSetupCanceled()
                 else:
-                    _raw_areas = []
-                    for lv in _fine_levels_sorted:
-                        if cancel_check and cancel_check():
+                    _rawAreas = []
+                    for lv in _fineLevelsSorted:
+                        if cancelCheck and cancelCheck():
                             raise _GrainSetupCanceled()
-                        _raw_areas.append(_marching_area_pixels(regressionMapUninhib, valid, lv))
-                _fine_pairs = [
+                        _rawAreas.append(_marchingAreaPixels(regressionMapUninhib, valid, lv))
+                _finePairs = [
                     (lv, self.mapToArea(av))
-                    for lv, av in zip(_fine_levels_sorted, _raw_areas)
+                    for lv, av in zip(_fineLevelsSorted, _rawAreas)
                     if av is not None
                 ]
 
         # Merge coarse + fine sorted by level, expand into polled/burningArea.
-        for _lvl, _area in sorted(_coarse_pairs + _fine_pairs):
+        for _lvl, _area in sorted(_coarsePairs + _finePairs):
             polled.append(_lvl)
             burningArea.append(_area)
 
@@ -1165,19 +1161,50 @@ class Fmm3DGrain(Grain):
         # where MC found no surface — area is physically zero there.  Adding
         # it (and maxDist) as explicit zeros gives the SG smoother enough
         # zero-points to keep the tail near zero.
-        if _first_failed_coarse is not None and (not polled or _first_failed_coarse > polled[-1]):
-            polled.append(_first_failed_coarse)
+        if _firstFailedCoarse is not None and (not polled or _firstFailedCoarse > polled[-1]):
+            polled.append(_firstFailedCoarse)
             burningArea.append(0.0)
         if len(polled) == 0 or polled[-1] < maxDist:
             polled.append(maxDist)
             burningArea.append(0.0)
 
-        self.faceArea = _smooth_series(burningArea)
         self._maxPolledDist = maxDist  # used by getSurfaceAreaAtRegression / getVolumeAtRegression
         if len(polled) < 2:
+            self.faceArea = np.zeros(2)
             self.faceAreaFunc = interpolate.interp1d([0.0, 1.0], [0.0, 0.0])
+            self.volumeFunc = None
         else:
-            self.faceAreaFunc = interpolate.interp1d(polled, self.faceArea)
+            # Compute volume curve and SA on a uniform grid so that
+            # _smoothSeries (SG filter) and np.gradient both see even spacing.
+            # The MC-derived adaptive 'polled' has non-uniform spacing that
+            # produces derivative artifacts at refinement boundaries.
+            _rmSorted = np.sort(regressionMapUninhib[valid].ravel())
+            _nVox = len(_rmSorted)
+            _nPts = max(len(polled), 50)
+            _uniformPolled = np.linspace(0.0, maxDist, _nPts)
+            _idxs = np.searchsorted(_rmSorted, _uniformPolled, side='right')
+            _volCounts = self.mapToVolume(_nVox - _idxs.astype(float))
+            _smoothVol = _smoothSeries(_volCounts)
+            self.volumeFunc = interpolate.interp1d(
+                _uniformPolled, _smoothVol,
+                fill_value=(_smoothVol[0], 0.0),
+                bounds_error=False,
+            )
+
+            # Derive surface area from the volume curve via the co-area
+            # formula: SA(r) = -dV/dr.  This is exact for uniform regression
+            # and automatically consistent with the volume (mass) tracking,
+            # eliminating the phantom-thrust divergence that marching-cubes
+            # iso-surface area exhibits on complex geometries.
+            _diameter = self.props['diameter'].getValue()
+            _dr = _uniformPolled[1] - _uniformPolled[0]
+            _dVdMap = np.gradient(_smoothVol, _dr)
+            self.faceArea = np.maximum(-_dVdMap * (2.0 / _diameter), 0.0)
+            self.faceAreaFunc = interpolate.interp1d(
+                _uniformPolled, self.faceArea,
+                fill_value=(float(self.faceArea[0]), 0.0),
+                bounds_error=False,
+            )
 
         # Remove uninhibited disks, if necessary
         if self.props['inhibitedEnds'].getValue() in ['Top', 'Neither']:# BOTTOM
@@ -1205,88 +1232,59 @@ class Fmm3DGrain(Grain):
         # Also precompute foreAreaFunc for the fore face (last 5% of z-slices,
         # min core area), which smooths the denominator for massFlux3D=True
         # peak candidates near the fore end (e.g. conical with inverted taper).
-        _aft_inhibited  = self.props['inhibitedEnds'].getValue() in ('Both', 'Bottom')
-        _fore_inhibited = self.props['inhibitedEnds'].getValue() in ('Both', 'Top')
-        if _HAS_FMM3D_CY and len(polled) >= 2:
-            if cancel_check and cancel_check():
+        _aftInhibited  = self.props['inhibitedEnds'].getValue() in ('Both', 'Bottom')
+        _foreInhibited = self.props['inhibitedEnds'].getValue() in ('Both', 'Top')
+        if _hasFmm3dCy and len(polled) >= 2:
+            if cancelCheck and cancelCheck():
                 raise _GrainSetupCanceled()
-            if status_cb:
-                status_cb("Building port area lookup\u2026")
+            if statusCb:
+                statusCb("Building port area lookup\u2026")
             _zdim = self._regressionMapF64.shape[0]
-            _scan_aft  = max(2, _zdim // 20)           # z = 0 .. _scan_aft-1
-            _scan_fore = max(2, _zdim // 20)            # z = _zdim-_scan_fore .. _zdim-1
-            _portCounts = [] if _aft_inhibited  else None
-            _foreCounts = [] if _fore_inhibited else None
+            _scanAft  = max(2, _zdim // 20)           # z = 0 .. _scanAft-1
+            _scanFore = max(2, _zdim // 20)            # z = _zdim-_scanFore .. _zdim-1
+            _portCounts = [] if _aftInhibited  else None
+            _foreCounts = [] if _foreInhibited else None
             for _lvl in polled:
-                if cancel_check and cancel_check():
+                if cancelCheck and cancelCheck():
                     raise _GrainSetupCanceled()
-                if _aft_inhibited:
+                if _aftInhibited:
                     _best = 0
-                    for _z in range(_scan_aft):
+                    for _z in range(_scanAft):
                         _c = get_core_area_count_at_slice(
                             self._regressionMapF64, self._maskU8, _lvl, _z
                         )
                         if _c > _best:
                             _best = _c
                     _portCounts.append(self.mapToArea(_best))
-                if _fore_inhibited:
+                if _foreInhibited:
                     _best = 0
-                    for _z in range(_zdim - _scan_fore, _zdim):
+                    for _z in range(_zdim - _scanFore, _zdim):
                         _c = get_core_area_count_at_slice(
                             self._regressionMapF64, self._maskU8, _lvl, _z
                         )
                         if _c > _best:
                             _best = _c
                     _foreCounts.append(self.mapToArea(_best))
-            _interp_kwargs = dict(bounds_error=False)
-            if _aft_inhibited:
+            _interpKwargs = dict(bounds_error=False)
+            if _aftInhibited:
                 self.portAreaFunc = interpolate.interp1d(
-                    polled, _smooth_series(_portCounts),
+                    polled, _smoothSeries(_portCounts),
                     fill_value=(_portCounts[0], _portCounts[-1]),
-                    **_interp_kwargs,
+                    **_interpKwargs,
                 )
             else:
                 self.portAreaFunc = None
-            if _fore_inhibited:
+            if _foreInhibited:
                 self.foreAreaFunc = interpolate.interp1d(
-                    polled, _smooth_series(_foreCounts),
+                    polled, _smoothSeries(_foreCounts),
                     fill_value=(_foreCounts[0], _foreCounts[-1]),
-                    **_interp_kwargs,
+                    **_interpKwargs,
                 )
             else:
                 self.foreAreaFunc = None
         else:
             self.portAreaFunc = None
             self.foreAreaFunc = None
-
-        # Precompute volumeFunc: smooth propellant volume vs mapDist.
-        # getVolumeAtRegression is called every simulation step to find the mass
-        # remaining; mass flow = density*(V_old - V_new)/dTime.  The raw voxel
-        # count is a step function with ring-event batch drops, which appear as
-        # sharp spikes in the Mass Flow graph.  SG-smoothing the volume curve
-        # makes mass flow a smooth physical curve.
-        if len(polled) >= 2 and self._regressionMapF64 is not None:
-            # self.mask may be 2D (ydim, xdim) for FmmGrain subclasses or
-            # 3D (zdim, ydim, xdim) for Fmm3DGrain subclasses.  All z-slices
-            # share the same cylinder mask, so take slice [0] when 3D.
-            _mask2d = self.mask[0] if self.mask.ndim == 3 else self.mask
-            _validFlat = np.logical_not(_mask2d).ravel()               # (ydim*xdim,)
-            _zdim_rm = self._regressionMapF64.shape[0]
-            _rmFlat = self._regressionMapF64.reshape(_zdim_rm, -1)     # (zdim, ydim*xdim)
-            _rmSorted = np.sort(_rmFlat[:, _validFlat].ravel())        # 1D ascending, propellant voxels only
-            _Nvox = len(_rmSorted)
-            _polledArr = np.asarray(polled)
-            # searchsorted gives the number of voxels <= each level; subtract to get voxels > level
-            _idxs = np.searchsorted(_rmSorted, _polledArr, side='right')
-            _volCounts = self.mapToVolume(_Nvox - _idxs.astype(float))
-            _smoothVol = _smooth_series(_volCounts)
-            self.volumeFunc = interpolate.interp1d(
-                polled, _smoothVol,
-                fill_value=(_smoothVol[0], 0.0),
-                bounds_error=False,
-            )
-        else:
-            self.volumeFunc = None
 
         self._regressionMapCacheKey = self._makeCoreMapCacheKey(
             self.coreMap, self.props['inhibitedEnds'].getValue(), self.mapDim
@@ -1317,7 +1315,7 @@ class Fmm3DGrain(Grain):
             return 0  # Past burnout
         if self.volumeFunc is not None:
             return max(0.0, float(self.volumeFunc(mapDist)))
-        if _HAS_FMM3D_CY:
+        if _hasFmm3dCy:
             regressionMap = self._regressionMapF64 if self._regressionMapF64 is not None else self.regressionMap
             maskU8 = self._maskU8 if self._maskU8 is not None else self.mask
             voxelCount = get_volume_count_gt_threshold(regressionMap, maskU8, mapDist)
@@ -1352,7 +1350,7 @@ class Fmm3DGrain(Grain):
             # Use the precomputed smooth portAreaFunc for aft-face queries to avoid
             # ring-event voxelization spikes in the denominator.  Fall back to the
             # raw voxel count for positions deep inside the grain (not near aft).
-            if _HAS_FMM3D_CY:
+            if _hasFmm3dCy:
                 regressionMap = self._regressionMapF64 if self._regressionMapF64 is not None else self.regressionMap
                 maskU8 = self._maskU8 if self._maskU8 is not None else self.mask
                 if self.portAreaFunc is not None and zPos < zdim // 20:
@@ -1379,7 +1377,7 @@ class Fmm3DGrain(Grain):
         # This avoids differentiating the (noisy) discrete voxel-count volume
         # function, which creates large batch-transition spikes for prismatic
         # grains where the same 2D topology event repeats across every z-slice.
-        if _HAS_FMM3D_CY:
+        if _hasFmm3dCy:
             regressionMap = self._regressionMapF64 if self._regressionMapF64 is not None else self.regressionMap
             maskU8 = self._maskU8 if self._maskU8 is not None else self.mask
             coreAreaVoxels = get_core_area_count_at_slice(regressionMap, maskU8, mapDist, zPos)
@@ -1402,7 +1400,7 @@ class Fmm3DGrain(Grain):
         if coreArea <= 0:
             return 0
         stepSize = self._getMeshedMarchingStepSize(regDist, dRegDist, zPos)
-        areaPixels = _marching_area_pixels(self.regressionMap, mcMask, mapDist, step_size=stepSize)
+        areaPixels = _marchingAreaPixels(self.regressionMap, mcMask, mapDist, step_size=stepSize)
         if areaPixels is None:
             return 0
         return (massIn + density * self.mapToArea(areaPixels) * dRegDist) / (coreArea * dTime)
@@ -1425,7 +1423,7 @@ class Fmm3DGrain(Grain):
             if not candidates:
                 return 0.0
 
-            if _HAS_FMM3D_CY:
+            if _hasFmm3dCy:
                 regressionMap = self._regressionMapF64 if self._regressionMapF64 is not None else self.regressionMap
                 maskU8 = self._maskU8 if self._maskU8 is not None else self.mask
                 mapDist = self.normalize(regDist)
@@ -1439,36 +1437,36 @@ class Fmm3DGrain(Grain):
                 # This is smooth because faceArea is SG-filtered and V-ratios are
                 # stable, avoiding the derivative-of-discrete-volume noise that
                 # created large spikes for prismatic grains.
-                core_counts, prop_sfx_reg, prop_sfx_dreg = get_massflux_slice_suffix_arrays(
+                coreCounts, propSfxReg, propSfxDreg = get_massflux_slice_suffix_arrays(
                     regressionMap, maskU8, mapDist, mapDist_dreg
                 )
-                total_reg = int(prop_sfx_reg[0]) if zdim > 0 else 0
+                totalReg = int(propSfxReg[0]) if zdim > 0 else 0
 
                 smoothBurnVol = self.getSurfaceAreaAtRegression(regDist) * dRegDist
 
                 peakFlux = -np.inf
-                _aft_thresh  = zdim // 20
-                _fore_thresh = zdim * 19 // 20
+                _aftThresh  = zdim // 20
+                _foreThresh = zdim * 19 // 20
                 mapDist_float = float(mapDist)
                 for position in candidates:
                     z = position
-                    coreAreaVoxels = int(core_counts[z])
+                    coreAreaVoxels = int(coreCounts[z])
                     if coreAreaVoxels <= 0:
                         continue
                     # Use precomputed smooth area functions for near-aft / near-fore positions
                     # to avoid ring-event voxelisation spikes in the denominator.
-                    if self.portAreaFunc is not None and z < _aft_thresh:
+                    if self.portAreaFunc is not None and z < _aftThresh:
                         coreArea = float(self.portAreaFunc(mapDist_float))
-                    elif self.foreAreaFunc is not None and z > _fore_thresh:
+                    elif self.foreAreaFunc is not None and z > _foreThresh:
                         coreArea = float(self.foreAreaFunc(mapDist_float))
                     else:
                         coreArea = self.mapToArea(coreAreaVoxels)
                     if coreArea <= 0:
                         continue
                     # zFraction = V_prop(0..z) / V_total
-                    sfx_reg  = int(prop_sfx_reg[z + 1]) if z + 1 < zdim else 0
-                    partial  = total_reg - sfx_reg
-                    zFraction = partial / total_reg if total_reg > 0 else 0.0
+                    sfxReg  = int(propSfxReg[z + 1]) if z + 1 < zdim else 0
+                    partial  = totalReg - sfxReg
+                    zFraction = partial / totalReg if totalReg > 0 else 0.0
                     massFlow = massIn + zFraction * smoothBurnVol * density / dTime
                     massFlux = massFlow / coreArea
                     if massFlux > peakFlux:
@@ -1497,7 +1495,7 @@ class Fmm3DGrain(Grain):
         #     self.generateRegressionMap()
 
         mapDist = self.normalize(regDist)
-        if _HAS_FMM3D_CY:
+        if _hasFmm3dCy:
             regressionMap = self._regressionMapF64 if self._regressionMapF64 is not None else self.regressionMap
             maskU8 = self._maskU8 if self._maskU8 is not None else self.mask
             firstIdx, lastIdx = get_first_last_prop_indices(regressionMap, maskU8, mapDist)
@@ -1528,16 +1526,16 @@ class Fmm3DGrain(Grain):
         """
 
         mapDist = self.normalize(regDist)
-        if _HAS_FMM3D_CY:
+        if _hasFmm3dCy:
             regressionMap = self._regressionMapF64 if self._regressionMapF64 is not None else self.regressionMap
             maskU8 = self._maskU8 if self._maskU8 is not None else self.mask
             zdim = regressionMap.shape[0]
             # Scan the first ~5 % of aft-facing slices for the best (maximum)
             # bore area.  Solid end-cap faces (inhibitedEnds != Neither/Top)
             # appear as near-zero core and are automatically out-competed.
-            scan_to = max(2, zdim // 20)
+            scanTo = max(2, zdim // 20)
             best = get_core_area_count_at_slice(regressionMap, maskU8, mapDist, 0)
-            for z in range(1, scan_to):
+            for z in range(1, scanTo):
                 c = get_core_area_count_at_slice(regressionMap, maskU8, mapDist, z)
                 if c > best:
                     best = c
@@ -1553,11 +1551,11 @@ class Fmm3DGrain(Grain):
         # Use the same max-in-first-5% logic as the Cython path to handle
         # solid end caps.
         zdim = mapAtReg.shape[0]
-        scan_to = max(2, zdim // 20)
-        aft_slice_cores = lengthwiseCores[:scan_to][lengthwiseProp[:scan_to] > 0]
-        if len(aft_slice_cores) == 0:
+        scanTo = max(2, zdim // 20)
+        aftSliceCores = lengthwiseCores[:scanTo][lengthwiseProp[:scanTo] > 0]
+        if len(aftSliceCores) == 0:
             return self.mapToArea(0)
-        return self.mapToArea(int(aft_slice_cores.max()))
+        return self.mapToArea(int(aftSliceCores.max()))
 
     def getInitialLength(self):
         if self.totalLength is None:
@@ -1570,24 +1568,7 @@ class Fmm3DGrain(Grain):
             return 'Length: {}'.format(self.props['length'].dispFormat(lengthUnit))
 
         return 'Length: {}'.format(self.totalLength.dispFormat(lengthUnit))
-    
-    # def getPortArea(self, regDist):z
-    #     """For a given regDist, gets the minimum port area down the entire grain core."""
-    #     if self.regressionMap is None:
-    #         self.initGeometry(self.mapDim)
-    #         self.generateCoreMap()
-    #         self.generateRegressionMap()
 
-    #     mapDist = self.normalize(regDist)
-    #     mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
-
-    #     mapAtReg = mapAtReg.reshape((mapAtReg.shape[0], -1))
-
-    #     lengthwiseProp = np.sum(mapAtReg, axis=1)
-    #     lengthwiseCores = np.sum(np.logical_not(mapAtReg), axis=1)
-
-    #     return self.mapToArea(lengthwiseCores[lengthwiseProp > 0][0])
-    
     def getGeometryErrors(self):
         """Returns a list of simAlerts that detail any issues with the geometry of the grain. Errors should be
         used for any condition that prevents simulation of the grain, while warnings can be used to notify the

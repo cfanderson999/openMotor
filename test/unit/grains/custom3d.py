@@ -5,7 +5,7 @@ Test coverage:
   - Static / class methods: _applyCoreAxisOrientation, _getLengthExtent, LRU cache
   - Property defaults and setProperties round-trip
   - Mesh signature hashing (_getMeshSignature)
-  - hashCoreMapInputs determinism
+  - getCoreMapHash determinism
   - Fmm3DGrain._makeCoreMapCacheKey
   - Unit-conversion helpers: normalize/unNormalize/lengthToMap/mapToLength/areaToMap/mapToArea
   - Empty-mesh (endburner-only) code path
@@ -30,10 +30,7 @@ import numpy as np
 
 import motorlib.grain
 import motorlib.grains
-# motorlib.grains.__init__ does `from .custom3d import *`, which shadows the
-# submodule name with the class.  Import the class explicitly so _custom3d_mod
-# IS the class and we can call _custom3d_mod() / _custom3d_mod._method directly.
-from motorlib.grains import custom3d as _custom3d_mod
+from motorlib.grains import Custom3DGrain
 
 # ---------------------------------------------------------------------------
 # Helpers shared across test cases
@@ -78,7 +75,7 @@ def _make_bore_cylinder(radius=0.01, length=0.04, segments=16):
 class _MockConfig:
     """Minimal simulation-config duck-type with a 3DmapDim setting."""
 
-    def __init__(self, map_dim_3d=48):
+    def __init__(self, map_dim_3d=100):
         self._props = {'3DmapDim': map_dim_3d, 'mapDim': 500}
 
     def getProperty(self, name):
@@ -93,7 +90,7 @@ class TestApplyCoreAxisOrientation(unittest.TestCase):
     """Tests for custom3d._applyCoreAxisOrientation."""
 
     def _orient(self, arr, axis):
-        return _custom3d_mod._applyCoreAxisOrientation(arr, axis)
+        return Custom3DGrain._applyCoreAxisOrientation(arr, axis)
 
     def test_plus_Y_is_identity(self):
         """'+Y' selects Y (voxelised axis-0) as length → no-op."""
@@ -154,7 +151,7 @@ class TestGetLengthExtent(unittest.TestCase):
     """Tests for custom3d._getLengthExtent."""
 
     def _ext(self, bounds, axis):
-        return _custom3d_mod._getLengthExtent(bounds, axis)
+        return Custom3DGrain._getLengthExtent(bounds, axis)
 
     def test_Y_axis(self):
         bounds = (0.01, 0.02, 0.03)   # (dX, dY, dZ)
@@ -183,46 +180,46 @@ class TestVoxelCacheLRU(unittest.TestCase):
 
     def setUp(self):
         # Save and clear the global class-level cache for isolation.
-        self._orig_cache = _custom3d_mod._VOXEL_CACHE.copy()
-        self._orig_max = _custom3d_mod._VOXEL_CACHE_MAX
-        _custom3d_mod._VOXEL_CACHE.clear()
+        self._orig_cache = Custom3DGrain._VOXEL_CACHE.copy()
+        self._orig_max = Custom3DGrain._VOXEL_CACHE_MAX
+        Custom3DGrain._VOXEL_CACHE.clear()
 
     def tearDown(self):
-        _custom3d_mod._VOXEL_CACHE.clear()
-        _custom3d_mod._VOXEL_CACHE.update(self._orig_cache)
-        _custom3d_mod._VOXEL_CACHE_MAX = self._orig_max
+        Custom3DGrain._VOXEL_CACHE.clear()
+        Custom3DGrain._VOXEL_CACHE.update(self._orig_cache)
+        Custom3DGrain._VOXEL_CACHE_MAX = self._orig_max
 
     def test_store_and_retrieve(self):
-        _custom3d_mod._rememberVoxelCache('k1', 'v1')
-        self.assertEqual(_custom3d_mod._VOXEL_CACHE.get('k1'), 'v1')
+        Custom3DGrain._rememberVoxelCache('k1', 'v1')
+        self.assertEqual(Custom3DGrain._VOXEL_CACHE.get('k1'), 'v1')
 
     def test_evicts_oldest_when_full(self):
-        _custom3d_mod._VOXEL_CACHE_MAX = 3
+        Custom3DGrain._VOXEL_CACHE_MAX = 3
         for i in range(4):
-            _custom3d_mod._rememberVoxelCache(f'k{i}', f'v{i}')
+            Custom3DGrain._rememberVoxelCache(f'k{i}', f'v{i}')
         # 'k0' inserted first and never re-accessed — must be gone.
-        self.assertNotIn('k0', _custom3d_mod._VOXEL_CACHE)
-        self.assertIn('k3', _custom3d_mod._VOXEL_CACHE)
+        self.assertNotIn('k0', Custom3DGrain._VOXEL_CACHE)
+        self.assertIn('k3', Custom3DGrain._VOXEL_CACHE)
 
     def test_reinsertion_prevents_eviction(self):
         """Re-inserting an entry moves it to the end, saving it from eviction."""
-        _custom3d_mod._VOXEL_CACHE_MAX = 3
+        Custom3DGrain._VOXEL_CACHE_MAX = 3
         for i in range(3):
-            _custom3d_mod._rememberVoxelCache(f'k{i}', f'v{i}')
+            Custom3DGrain._rememberVoxelCache(f'k{i}', f'v{i}')
         # Promote 'k0' to the most-recently-used position.
-        _custom3d_mod._rememberVoxelCache('k0', 'v0_updated')
+        Custom3DGrain._rememberVoxelCache('k0', 'v0_updated')
         # Insert a new entry — 'k1' should be evicted (the new LRU tail).
-        _custom3d_mod._rememberVoxelCache('k3', 'v3')
-        self.assertIn('k0', _custom3d_mod._VOXEL_CACHE)
-        self.assertNotIn('k1', _custom3d_mod._VOXEL_CACHE)
+        Custom3DGrain._rememberVoxelCache('k3', 'v3')
+        self.assertIn('k0', Custom3DGrain._VOXEL_CACHE)
+        self.assertNotIn('k1', Custom3DGrain._VOXEL_CACHE)
 
     def test_cache_does_not_exceed_max(self):
-        _custom3d_mod._VOXEL_CACHE_MAX = 5
+        Custom3DGrain._VOXEL_CACHE_MAX = 5
         for i in range(10):
-            _custom3d_mod._rememberVoxelCache(f'key{i}', i)
+            Custom3DGrain._rememberVoxelCache(f'key{i}', i)
         self.assertLessEqual(
-            len(_custom3d_mod._VOXEL_CACHE),
-            _custom3d_mod._VOXEL_CACHE_MAX,
+            len(Custom3DGrain._VOXEL_CACHE),
+            Custom3DGrain._VOXEL_CACHE_MAX,
         )
 
 
@@ -266,7 +263,7 @@ class TestMakeCoreMapCacheKey(unittest.TestCase):
 class TestCustom3DGrainProperties(unittest.TestCase):
 
     def _make(self):
-        return _custom3d_mod()
+        return Custom3DGrain()
 
     def test_geomName(self):
         self.assertEqual(self._make().geomName, 'Custom 3D Grain')
@@ -316,7 +313,7 @@ class TestCustom3DGrainProperties(unittest.TestCase):
 class TestMeshSignature(unittest.TestCase):
 
     def setUp(self):
-        self.grain = _custom3d_mod()
+        self.grain = Custom3DGrain()
 
     def test_raw_signature_is_deterministic(self):
         f, v = _make_bore_cylinder()
@@ -356,38 +353,38 @@ class TestMeshSignature(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 5. hashCoreMapInputs determinism
+# 5. getCoreMapHash determinism
 # ---------------------------------------------------------------------------
 
-class TestHashCoreMapInputs(unittest.TestCase):
+class TestGetCoreMapHash(unittest.TestCase):
 
     def test_hash_is_deterministic(self):
-        g1 = _custom3d_mod()
-        g2 = _custom3d_mod()
+        g1 = Custom3DGrain()
+        g2 = Custom3DGrain()
         for g in (g1, g2):
             g.setProperties({'diameter': 0.05, 'length': 0.0, 'stlUnit': 'm'})
-            g.mapDim = 48
-        self.assertEqual(g1.hashCoreMapInputs(), g2.hashCoreMapInputs())
+            g.mapDim = 100
+        self.assertEqual(g1.getCoreMapHash(), g2.getCoreMapHash())
 
     def test_hash_changes_with_diameter(self):
-        g1 = _custom3d_mod()
-        g2 = _custom3d_mod()
+        g1 = Custom3DGrain()
+        g2 = Custom3DGrain()
         g1.setProperties({'diameter': 0.05, 'length': 0.0})
         g2.setProperties({'diameter': 0.06, 'length': 0.0})
-        g1.mapDim = g2.mapDim = 48
-        self.assertNotEqual(g1.hashCoreMapInputs(), g2.hashCoreMapInputs())
+        g1.mapDim = g2.mapDim = 100
+        self.assertNotEqual(g1.getCoreMapHash(), g2.getCoreMapHash())
 
     def test_hash_changes_with_mesh(self):
-        g1 = _custom3d_mod()
-        g2 = _custom3d_mod()
+        g1 = Custom3DGrain()
+        g2 = Custom3DGrain()
         f1, v1 = _make_bore_cylinder(radius=0.01)
         f2, v2 = _make_bore_cylinder(radius=0.02)
         g1.setProperties({'diameter': 0.05, 'length': 0.0})
         g2.setProperties({'diameter': 0.05, 'length': 0.0})
         g1.props['mesh'].setValue((f1, v1))
         g2.props['mesh'].setValue((f2, v2))
-        g1.mapDim = g2.mapDim = 48
-        self.assertNotEqual(g1.hashCoreMapInputs(), g2.hashCoreMapInputs())
+        g1.mapDim = g2.mapDim = 100
+        self.assertNotEqual(g1.getCoreMapHash(), g2.getCoreMapHash())
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +394,7 @@ class TestHashCoreMapInputs(unittest.TestCase):
 class TestUnitConversions(unittest.TestCase):
 
     def setUp(self):
-        self.grain = _custom3d_mod()
+        self.grain = Custom3DGrain()
         self.grain.setProperties({'diameter': 0.05, 'length': 0.0})
         self.grain.mapDim = 64
 
@@ -459,15 +456,17 @@ class TestEmptyMeshCodePath(unittest.TestCase):
     """generateCoreMap with no faces/vertices → endburner-only stub."""
 
     def _make_grain(self, length=0.04, mapDim=64):
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({'diameter': 0.05, 'length': length, 'inhibitedEnds': 'Top'})
         g.mapDim = mapDim
         return g
 
-    def test_coreMap_shape_has_one_slice(self):
+    def test_coreMap_shape_has_proper_depth(self):
         g = self._make_grain()
         g.generateCoreMap()
-        self.assertEqual(g.coreMap.shape[0], 1)
+        # No-mesh grain depth should be proportional to length/diameter ratio.
+        expected = max(1, int(np.ceil(g.lengthToMap(g.totalLength.getValue()))))
+        self.assertEqual(g.coreMap.shape[0], expected)
 
     def test_coreMap_is_all_propellant(self):
         g = self._make_grain()
@@ -485,10 +484,10 @@ class TestEmptyMeshCodePath(unittest.TestCase):
         self.assertIsNotNone(g.mask)
 
     def test_mask_shape_matches_coreMap_xy(self):
-        g = self._make_grain(mapDim=48)
+        g = self._make_grain(mapDim=100)
         g.generateCoreMap()
-        self.assertEqual(g.mask.shape[1], 48)
-        self.assertEqual(g.mask.shape[2], 48)
+        self.assertEqual(g.mask.shape[1], 100)
+        self.assertEqual(g.mask.shape[2], 100)
 
     def test_generates_valid_regression_map(self):
         """After generateCoreMap on empty mesh, generateRegressionMap should succeed."""
@@ -506,7 +505,7 @@ class TestGetDetailsString(unittest.TestCase):
 
     def test_no_mesh_no_voxelization_contains_Length(self):
         """With no mesh and totalLength=None, should estimate from props only."""
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({'diameter': 0.05, 'length': 0.04})
         # totalLength stays None (no generateCoreMap called)
         result = g.getDetailsString('m')
@@ -514,7 +513,7 @@ class TestGetDetailsString(unittest.TestCase):
 
     def test_with_vertices_estimates_extent(self):
         """Having mesh vertices should add an axis extent to the length estimate."""
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({
             'diameter': 0.05, 'length': 0.01,
             'stlUnit': 'm', 'coreAxis': '-Y',
@@ -526,18 +525,18 @@ class TestGetDetailsString(unittest.TestCase):
 
     def test_after_empty_generateCoreMap_delegates_to_parent(self):
         """After generateCoreMap sets totalLength, delegate to Fmm3DGrain."""
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({'diameter': 0.05, 'length': 0.04, 'inhibitedEnds': 'Top'})
-        g.mapDim = 48
+        g.mapDim = 100
         g.generateCoreMap()
         result = g.getDetailsString('m')
         self.assertIn('Length', result)
 
     def test_unit_conversion_in_details_string(self):
         """getDetailsString with 'mm' should include an mm-scaled value."""
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({'diameter': 0.05, 'length': 0.04, 'inhibitedEnds': 'Top'})
-        g.mapDim = 48
+        g.mapDim = 100
         g.generateCoreMap()
         result_mm = g.getDetailsString('mm')
         self.assertIn('Length', result_mm)
@@ -555,14 +554,14 @@ class TestGetGeometryErrors(unittest.TestCase):
 
     def test_no_error_for_valid_grain(self):
         from motorlib.simResult import SimAlertLevel
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({'diameter': 0.05, 'length': 0.0})
         errors = self._errors_at_level(g.getGeometryErrors(), SimAlertLevel.ERROR)
         self.assertEqual(len(errors), 0)
 
     def test_error_for_zero_diameter(self):
         from motorlib.simResult import SimAlertLevel
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         # diameter defaults to 0
         errors = self._errors_at_level(g.getGeometryErrors(), SimAlertLevel.ERROR)
         self.assertGreater(len(errors), 0)
@@ -570,7 +569,7 @@ class TestGetGeometryErrors(unittest.TestCase):
     def test_error_for_endburner_length_with_uninhibited_top(self):
         """Non-zero endburner length with 'Neither' inhibition is invalid."""
         from motorlib.simResult import SimAlertLevel
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({
             'diameter':      0.05,
             'length':        0.01,       # non-zero endburner
@@ -581,7 +580,7 @@ class TestGetGeometryErrors(unittest.TestCase):
 
     def test_no_error_for_endburner_with_top_inhibited(self):
         from motorlib.simResult import SimAlertLevel
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({
             'diameter':      0.05,
             'length':        0.01,
@@ -591,7 +590,7 @@ class TestGetGeometryErrors(unittest.TestCase):
         self.assertEqual(len(errors), 0)
 
     def test_returns_list(self):
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({'diameter': 0.05, 'length': 0.0})
         self.assertIsInstance(g.getGeometryErrors(), list)
 
@@ -603,8 +602,8 @@ class TestGetGeometryErrors(unittest.TestCase):
 class TestRegressionMapCache(unittest.TestCase):
     """Fmm3DGrain._regressionMapCacheKey logic."""
 
-    def _make_grain(self, mapDim=48):
-        g = _custom3d_mod()
+    def _make_grain(self, mapDim=100):
+        g = Custom3DGrain()
         g.setProperties({'diameter': 0.05, 'length': 0.04, 'inhibitedEnds': 'Top'})
         g.simulationSetup(_MockConfig(map_dim_3d=mapDim))
         return g
@@ -661,16 +660,16 @@ class TestEndburnerGrain(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.grain = _custom3d_mod()
+        cls.grain = Custom3DGrain()
         cls.grain.setProperties({
             'diameter':      0.05,
             'length':        0.05,   # 50 mm endburner cap
             'inhibitedEnds': 'Top',
         })
-        cls.grain.simulationSetup(_MockConfig(map_dim_3d=48))
+        cls.grain.simulationSetup(_MockConfig(map_dim_3d=100))
 
     def test_mapDim_set(self):
-        self.assertEqual(self.grain.mapDim, 48)
+        self.assertEqual(self.grain.mapDim, 100)
 
     def test_regressionMap_exists(self):
         self.assertIsNotNone(self.grain.regressionMap)
@@ -733,7 +732,7 @@ class TestEndburnerGrain(unittest.TestCase):
         self.assertTrue(self.grain.isWebLeft(0.0))
 
     def test_isWebLeft_false_past_burnout(self):
-        self.assertFalse(self.grain.isWebLeft(0.03))
+        self.assertFalse(self.grain.isWebLeft(self.grain.wallWeb + 0.001))
 
     def test_getVolumeSlice_positive(self):
         vs = self.grain.getVolumeSlice(0.0, 0.001)
@@ -763,7 +762,7 @@ class TestBoreGrain(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         faces, verts = _make_bore_cylinder(radius=0.01, length=0.04, segments=16)
-        cls.grain = _custom3d_mod()
+        cls.grain = Custom3DGrain()
         cls.grain.setProperties({
             'diameter':      0.05,
             'length':        0.0,
@@ -772,7 +771,7 @@ class TestBoreGrain(unittest.TestCase):
             'inhibitedEnds': 'Both',
         })
         cls.grain.props['mesh'].setValue((faces, verts, ''))
-        cls.grain.simulationSetup(_MockConfig(map_dim_3d=48))
+        cls.grain.simulationSetup(_MockConfig(map_dim_3d=100))
 
     def test_coreMap_has_void(self):
         """Bore voxels should appear as False (void) in coreMap."""
@@ -899,13 +898,13 @@ class TestGetMeshedMarchingMask(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.grain = _custom3d_mod()
+        cls.grain = Custom3DGrain()
         cls.grain.setProperties({
             'diameter':      0.05,
             'length':        0.04,
             'inhibitedEnds': 'Top',
         })
-        cls.grain.simulationSetup(_MockConfig(map_dim_3d=48))
+        cls.grain.simulationSetup(_MockConfig(map_dim_3d=100))
 
     def test_mask_shape_equals_regressionMap(self):
         mcMask, _ = self.grain._getMeshedMarchingMask(5)
@@ -946,9 +945,9 @@ class TestGetMeshedMarchingMask(unittest.TestCase):
 class TestGetMeshedMarchingStepSize(unittest.TestCase):
 
     def _make_grain(self, quality):
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({'diameter': 0.05, 'length': 0.04})
-        g.mapDim = 48
+        g.mapDim = 100
         g.setProperty('meshedMassFluxQuality', quality)
         return g
 
@@ -976,13 +975,13 @@ class TestInhibitedEndsAreaOrdering(unittest.TestCase):
     """
 
     def _make_endburner_grain(self, inhibited):
-        g = _custom3d_mod()
+        g = Custom3DGrain()
         g.setProperties({
             'diameter':      0.05,
             'length':        0.04,
             'inhibitedEnds': inhibited,
         })
-        g.simulationSetup(_MockConfig(map_dim_3d=48))
+        g.simulationSetup(_MockConfig(map_dim_3d=100))
         return g
 
     def test_neither_ge_top_inhibited(self):
@@ -1004,7 +1003,7 @@ class TestGetPeakMassFlux(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         faces, verts = _make_bore_cylinder(radius=0.01, length=0.04, segments=16)
-        cls.grain = _custom3d_mod()
+        cls.grain = Custom3DGrain()
         cls.grain.setProperties({
             'diameter':      0.05,
             'length':        0.0,
@@ -1014,7 +1013,7 @@ class TestGetPeakMassFlux(unittest.TestCase):
             'massFlux3D':    False,
         })
         cls.grain.props['mesh'].setValue((faces, verts, ''))
-        cls.grain.simulationSetup(_MockConfig(map_dim_3d=48))
+        cls.grain.simulationSetup(_MockConfig(map_dim_3d=100))
 
     def test_returns_finite_positive_value(self):
         peak = self.grain.getPeakMassFlux(
