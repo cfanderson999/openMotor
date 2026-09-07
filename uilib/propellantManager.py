@@ -1,4 +1,8 @@
+from os.path import join
+from os import replace
+
 from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtWidgets import QApplication
 
 import motorlib
 
@@ -20,6 +24,7 @@ class PropellantManager(QObject):
         self.propMenu.closed.connect(self.updated.emit)
 
     def loadPropellants(self):
+        propellantsPath = join(getConfigPath(), 'propellants.yaml')
         try:
             propList = loadFile(getConfigPath() + 'propellants.yaml', fileTypes.PROPELLANTS)
             for propDict in propList:
@@ -28,6 +33,13 @@ class PropellantManager(QObject):
                 self.propellants.append(newProp)
         except FileNotFoundError:
             logger.warn('No propellant file found, saving defaults')
+            self.propellants = [motorlib.propellant.Propellant(prop) for prop in DEFAULT_PROPELLANTS]
+            self.savePropellants()
+        except Exception as error:
+            backupPath = join(getConfigPath(), 'propellants_backup.yaml')
+            logger.warn('Error loading propellants: {}'.format(error))
+            QApplication.instance().outputException(error, "Failed to load propellants. Backing up file to '{}' and starting fresh.".format(backupPath))
+            replace(propellantsPath, backupPath)
             self.propellants = [motorlib.propellant.Propellant(prop) for prop in DEFAULT_PROPELLANTS]
             self.savePropellants()
 
@@ -45,6 +57,16 @@ class PropellantManager(QObject):
 
     def getPropellantByName(self, name):
         return self.propellants[self.getNames().index(name)]
+
+    # Modifies a propellant's name to not collide with any existing propellants, if necessary
+    def getUniquePropellantName(self, name):
+        if name not in self.getNames():
+            return name
+        withNumber = "{} ({})"
+        number = 1
+        while withNumber.format(name, number) in self.getNames():
+            number += 1
+        return withNumber.format(name, number)
 
     def showMenu(self):
         logger.log('Showing propellant menu')
