@@ -1,0 +1,27 @@
+repo_root: /home/carl/Documents/openMotor
+out_dir: /home/carl/Documents/openMotor/3dfmm_testing/out
+
+=== BATES ===
+- analytical_bates   OK   rc=0 csv=analytical_bates.csv log=analytical_bates.log
+- 3dfmm_bates        OK   rc=0 csv=3dfmm_bates.csv log=3dfmm_bates.log
+  burn_time      analytical=     2.68000 3dfmm=     2.85000 delta=    6.343%
+  peak_force     analytical=   838.00992 3dfmm=   844.49081 delta=    0.773%
+  peak_pressure  analytical=   690.88516 3dfmm=   695.20769 delta=    0.626%
+  total_impulse  analytical=  2023.34334 3dfmm=  1885.23141 delta=   -6.826%
+
+=== CONICAL ===
+- analytical_conical OK   rc=0 csv=analytical_conical.csv log=analytical_conical.log
+- 3dfmm_conical      OK   rc=0 csv=3dfmm_conical.csv log=3dfmm_conical.log
+  burn_time      analytical=     3.37000 3dfmm=     3.15000 delta=   -6.528%
+  peak_force     analytical=  1135.16702 3dfmm=   905.16083 delta=  -20.262%
+  peak_pressure  analytical=   889.07874 3dfmm=   735.67251 delta=  -17.255%
+  total_impulse  analytical=  1831.94624 3dfmm=  1707.06826 delta=   -6.817%
+
+=== FINOCYL ===
+- analytical_finocyl OK   rc=0 csv=analytical_finocyl.csv log=analytical_finocyl.log
+- 3dfmm_finocyl      OK   rc=0 csv=3dfmm_finocyl.csv log=3dfmm_finocyl.log
+  burn_time      analytical=     2.08000 3dfmm=     2.16000 delta=    3.846%
+  peak_force     analytical=  1501.40853 3dfmm=  1654.95208 delta=   10.227%
+  peak_pressure  analytical=  1133.34925 3dfmm=  1235.75752 delta=    9.036%
+  total_impulse  analytical=  1827.60486 3dfmm=  2042.02112 delta=   11.732%
+
