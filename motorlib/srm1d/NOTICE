@@ -1,0 +1,8 @@
+solver.py and burn_rate.py are vendored unmodified from srm_1d
+(https://github.com/eJar0k/srm_1d), MIT License, copyright its author.
+The upstream repository declares MIT in pyproject.toml but ships no LICENSE
+file; replace this notice with the upstream copyright line once confirmed.
+
+Ma, Y. et al. (2020). A New Erosive Burning Model of Solid Propellant Based
+on Heat Transfer Equilibrium at Propellant Surface.
+Int. J. Aerospace Eng., 2020, 8889333.
