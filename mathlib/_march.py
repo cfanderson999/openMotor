@@ -5,6 +5,7 @@ import os
 
 try:
     from ._march_cy import mc_surface_area as _mc_surface_area_cy  # type: ignore[import-not-found]
+    from ._march_cy import mc_surface_area_by_layer as _mc_surface_area_by_layer_cy  # type: ignore[import-not-found]
     _CY_AVAILABLE = True
 except ImportError:
     _CY_AVAILABLE = False
@@ -77,3 +78,16 @@ def marching_area_pixels(regression_map, valid_mask, level, step_size=1):
         return measure.mesh_surface_area(verts, faces)
     except (RuntimeError, ValueError):
         return None
+
+
+def marching_area_pixels_by_layer(regression_map, valid_mask, level):
+    """Iso-surface area in pixel units inside each layer of cubes between adjacent z-slices, shape (nz-1,)."""
+    grid, mask, lvl = _validate_inputs(regression_map, valid_mask, level)
+    if _CY_AVAILABLE and _env_enabled_default_true("OPENMOTOR_EXPERIMENTAL_CY_MARCH"):
+        try:
+            return np.asarray(_mc_surface_area_by_layer_cy(grid, np.ascontiguousarray(mask, dtype=np.uint8), lvl))
+        except Exception:
+            pass
+    return np.array([
+        marching_area_pixels(grid[k:k + 2], mask[k:k + 2], lvl) or 0.0 for k in range(grid.shape[0] - 1)
+    ])

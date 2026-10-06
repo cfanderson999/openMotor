@@ -205,3 +205,49 @@ def mc_surface_area(
                 )
 
     return total
+
+
+cdef double _layer_area(
+    cnp.float64_t[:, :, ::1] grid,
+    cnp.uint8_t[:, :, ::1]   vmask,
+    double level,
+    int iz, int ny, int nx,
+    int[:, ::1] tri_table,
+    int[::1] edz0, int[::1] edy0, int[::1] edx0,
+    int[::1] edz1, int[::1] edy1, int[::1] edx1,
+) nogil:
+    cdef double acc = 0.0
+    cdef int iy, ix
+    for iy in range(ny - 1):
+        for ix in range(nx - 1):
+            acc += _cube_area(grid, vmask, level, iz, iy, ix, tri_table, edz0, edy0, edx0, edz1, edy1, edx1, 1)
+    return acc
+
+
+def mc_surface_area_by_layer(
+    cnp.float64_t[:, :, ::1] grid      not None,
+    cnp.uint8_t[:, :, ::1]   valid_mask not None,
+    double level,
+):
+    """Iso-surface area in voxel^2 for each layer of cubes between adjacent z-slices; returns an (nz-1,) array."""
+    cdef int nz = grid.shape[0]
+    cdef int ny = grid.shape[1]
+    cdef int nx = grid.shape[2]
+    out = np.zeros(max(nz - 1, 0), dtype=np.float64)
+    if nz < 2 or ny < 2 or nx < 2:
+        return out
+
+    cdef int[:, ::1] tri_t = _TRI_TABLE
+    cdef int[::1]    edz0  = _EDGE_DZ0
+    cdef int[::1]    edy0  = _EDGE_DY0
+    cdef int[::1]    edx0  = _EDGE_DX0
+    cdef int[::1]    edz1  = _EDGE_DZ1
+    cdef int[::1]    edy1  = _EDGE_DY1
+    cdef int[::1]    edx1  = _EDGE_DX1
+    cdef double[::1] layer = out
+    cdef int iz
+
+    for iz in prange(nz - 1, nogil=True, schedule='dynamic'):
+        layer[iz] = _layer_area(grid, valid_mask, level, iz, ny, nx, tri_t, edz0, edy0, edx0, edz1, edy1, edx1)
+
+    return out
