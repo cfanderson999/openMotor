@@ -2,7 +2,9 @@
 
 from math import atan, cos, tan
 
-from ..grain import Grain
+import numpy as np
+
+from ..grain import ConvertedGrain, Grain, getCrossSectionCoordinates
 from .. import geometry
 from ..simResult import SimAlert, SimAlertLevel, SimAlertType
 from ..properties import FloatProperty, EnumProperty
@@ -16,6 +18,18 @@ class ConicalGrain(Grain):
         self.props['forwardCoreDiameter'] = FloatProperty('Forward Core Diameter', 'm', 0, maximumRefDiameter)
         self.props['aftCoreDiameter'] = FloatProperty('Aft Core Diameter', 'm', 0, maximumRefDiameter)
         self.props['inhibitedEnds'] = EnumProperty('Inhibited ends', ['Neither', 'Top', 'Bottom', 'Both'])
+
+    def getExtrudedCoreMap(self, mapLength, mapDim):
+        """The core is a frustum, so its radius is interpolated from the aft end (index 0) to the forward end."""
+        coords = getCrossSectionCoordinates(mapDim, cellCentered=True)
+        radiusSquared = coords[:, None] ** 2 + coords[None, :] ** 2
+        aft = self.props['aftCoreDiameter'].getValue()
+        forward = self.props['forwardCoreDiameter'].getValue()
+        coreRadius = (aft + (forward - aft) * (np.arange(mapLength) + 0.5) / mapLength) / self.props['diameter'].getValue()
+        return radiusSquared[None, :, :] >= (coreRadius ** 2)[:, None, None]
+
+    def convertTo3D(self):
+        return ConvertedGrain(self, self.props['inhibitedEnds'].getValue())
 
     def isCoreInverted(self):
         """A simple helper that returns 'true' if the core's foward diameter is larger than its aft diameter"""

@@ -13,7 +13,7 @@ try:
 except ImportError:
     _hasVoxelizeCy = False
 
-from ..grain import Fmm3DGrain
+from ..grain import Fmm3DGrain, getCrossSectionCoordinates
 from ..properties import MeshProperty, EnumProperty, FloatProperty
 from ..simResult import SimAlert, SimAlertLevel, SimAlertType
 from ..units import getAllConversions, convert
@@ -37,7 +37,9 @@ class Custom3DGrain(Fmm3DGrain):
         self.props['mesh'] = MeshProperty('Core geometry')
         self.props['stlUnit'] = EnumProperty('Mesh Unit', getAllConversions('m'))
         # Controls which mesh axis is aligned to motor length (map axis 0).
-        # Default '-Y' preserves legacy behavior (including historical length-direction flip).
+        # Default '-Y' preserves legacy behavior (including historical length-direction flip). The sign is the
+        # direction of the mesh axis along the motor: '+Y' puts the mesh's lowest Y at the aft (nozzle) end, which is
+        # index 0 of the map, and '-Y' puts its highest Y there.
         self.props['coreAxis'] = EnumProperty('Core Axis', ['-Y', '+Y', '+X', '-X', '+Z', '-Z'])
         self.faces = []
         self.vertices = []
@@ -127,7 +129,7 @@ class Custom3DGrain(Fmm3DGrain):
             self.mapLength = max(1, int(np.ceil(self.lengthToMap(self.totalLength.getValue()))))
             self.coreMap = np.ones((self.mapLength, self.mapDim, self.mapDim), dtype=bool)
             _x2d, _y2d = np.meshgrid(
-                np.linspace(-1, 1, self.mapDim), np.linspace(-1, 1, self.mapDim), indexing='ij'
+                getCrossSectionCoordinates(self.mapDim, True), getCrossSectionCoordinates(self.mapDim, True), indexing='ij'
             )
             self.mask = np.broadcast_to(
                 (_x2d**2 + _y2d**2 > 1)[np.newaxis, :, :],
@@ -239,7 +241,7 @@ class Custom3DGrain(Fmm3DGrain):
         # slice and use broadcast_to (zero-copy view) instead of a full 3D meshgrid.
         # For a 36" grain at mapDim=128 this saves ~1.15 GB vs the old np.meshgrid approach.
         _x2d, _y2d = np.meshgrid(
-            np.linspace(-1, 1, self.mapDim), np.linspace(-1, 1, self.mapDim), indexing='ij'
+            getCrossSectionCoordinates(self.mapDim, True), getCrossSectionCoordinates(self.mapDim, True), indexing='ij'
         )
         self.mask = np.broadcast_to(
             (_x2d**2 + _y2d**2 > 1)[np.newaxis, :, :],

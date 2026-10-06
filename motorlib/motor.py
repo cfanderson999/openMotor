@@ -1,5 +1,6 @@
 """Contains the motor class and a supporting configuration property collection."""
 
+import copy
 import os
 from typing import Dict, Union, List
 import numpy as np
@@ -10,9 +11,9 @@ from .constants import atmosphericPressure, gasConstant
 from .grains import EndBurningGrain, grainTypes
 from .nozzle import Nozzle
 from .propellant import Propellant
-from .properties import FloatProperty, IntProperty, PropertyCollection
+from .properties import BooleanProperty, FloatProperty, IntProperty, PropertyCollection
 from .simResult import SimAlert, SimAlertLevel, SimAlertType, SimulationResult
-from .grain import Grain, _GrainSetupCanceled
+from .grain import Fmm3DGrain, Grain, _GrainSetupCanceled
 
 
 class MotorConfig(PropertyCollection):
@@ -50,6 +51,8 @@ class MotorConfig(PropertyCollection):
         )
         self.props["mapDim"] = IntProperty("Grain Map Dimension", "", 250, 2000)
         self.props["3DmapDim"] = IntProperty("3D Grain Map Dimension", "", 32, 2000)
+        self.props["convertTo3D"] = BooleanProperty("Simulate Grains with 3D FMM")
+        self.props["convertTo3D"].setValue(False)
         self.props["sepPressureRatio"] = FloatProperty(
             "Separation Pressure Ratio", "", 0.001, 1
         )
@@ -66,6 +69,7 @@ class Motor:
         self.propellant = None
         self.nozzle = Nozzle()
         self.config = MotorConfig()
+        self.conversionNotes = []
 
         if propDict is not None:
             self.applyDict(propDict)
@@ -101,6 +105,41 @@ class Motor:
             self.grains.append(grainTypes[entry["type"]]())
             self.grains[-1].setProperties(entry["properties"])
         self.config.setProperties(dictionary["config"])
+
+    def _convertGrainTo3D(self, grain):
+        """Returns the 3D version of a grain, or the grain itself with the reason it was not converted."""
+        converted = grain.convertTo3D()
+        if converted is grain:
+            return grain, None if isinstance(grain, Fmm3DGrain) else "it has no 3D conversion"
+        issue = converted.getSizeIssue(self.config.getProperty("3DmapDim"))
+        if issue is not None:
+            return grain, issue
+        try:
+            converted.simulationSetup(self.config)
+            issue = converted.getGeometryIssue(self.config)
+        except Exception as error:  # A grain that cannot be converted must never stop the simulation
+            issue = "its 3D setup failed ({})".format(error)
+        return (grain, issue) if issue else (converted, None)
+
+    def getWithGrainsConvertedTo3D(self):
+        """Returns a motor that shares this motor's propellant and nozzle but simulates a 3D FMM version of every
+        grain that can be converted. The grains of this motor are left untouched. A grain keeps its original form
+        when it has no 3D equivalent, is too large, or its 3D geometry disagrees with the original. The returned
+        motor's 'conversionNotes' lists (grain index, reason) for each grain that was not converted."""
+        converted = Motor()
+        converted.propellant = self.propellant
+        converted.nozzle = self.nozzle
+        converted.config = copy.deepcopy(self.config)
+        converted.config.setProperty("convertTo3D", False)
+        if len(self.grains) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(len(self.grains), os.cpu_count() or 1)) as pool:
+                results = list(pool.map(self._convertGrainTo3D, self.grains))
+        else:
+            results = [self._convertGrainTo3D(grain) for grain in self.grains]
+        converted.grains = [grain for grain, _ in results]
+        converted.conversionNotes = [(gid, note) for gid, (_, note) in enumerate(results) if note is not None]
+        return converted
 
     def calcBurningSurfaceArea(self, regDepth):
         burnoutThres = self.config.getProperty("burnoutWebThres")
@@ -196,6 +235,16 @@ class Motor:
         using the pressure to determine how the motor will regress in the given timestep at the current pressure.
         This process is repeated and regression tracked until all grains have burned out, when the results and any
         warnings are returned."""
+        if self.config.getProperty("convertTo3D"):
+            converted = self.getWithGrainsConvertedTo3D()
+            simRes = converted.runSimulation(callback, onSimStart)
+            for gid, note in converted.conversionNotes:
+                description = "{} grain was simulated normally because {}".format(self.grains[gid].geomName, note)
+                simRes.addAlert(
+                    SimAlert(SimAlertLevel.WARNING, SimAlertType.CONSTRAINT, description, "Grain {}".format(gid + 1))
+                )
+            return simRes
+
         burnoutWebThres = self.config.getProperty("burnoutWebThres")
         burnoutThrustThres = self.config.getProperty("burnoutThrustThres")
         dTime = self.config.getProperty("timestep")

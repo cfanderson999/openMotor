@@ -4,7 +4,7 @@ import numpy as np
 import skfmm
 import mathlib
 
-from ..grain import PerforatedGrain
+from ..grain import PerforatedGrain, getCrossSectionCoordinates
 from .. import geometry
 from ..simResult import SimAlert, SimAlertLevel, SimAlertType
 from ..properties import FloatProperty
@@ -21,6 +21,13 @@ class RodTubeGrain(PerforatedGrain):
         self.props['supportDiameter'] = FloatProperty('Support Diameter', 'm', 0, maximumRefDiameter)
         self.tubeWeb = None
         self.rodWeb = None
+
+    def convertTo3D(self):
+        # The rod is free standing, so its ends burn whatever the tube's ends do. One end setting for the whole 3D
+        # grain only represents that when no end is inhibited.
+        if self.props['inhibitedEnds'].getValue() != 'Neither':
+            return self
+        return super().convertTo3D()
 
     def simulationSetup(self, config):
         self.tubeWeb = (self.props['diameter'].getValue() - self.props['coreDiameter'].getValue()) / 2
@@ -78,7 +85,8 @@ class RodTubeGrain(PerforatedGrain):
         rodRadius = (self.props['rodDiameter'].getValue() / (0.5 * self.props['diameter'].getValue())) / 2
         supportRadius = (self.props['supportDiameter'].getValue() / (0.5 * self.props['diameter'].getValue())) / 2
 
-        mapX, mapY = np.meshgrid(np.linspace(-1, 1, mapDim), np.linspace(-1, 1, mapDim))
+        coords = getCrossSectionCoordinates(mapDim, self.cellCenteredMap)
+        mapX, mapY = np.meshgrid(coords, coords)
         mask = np.logical_or(mapX**2 + mapY**2 > 1, mapX**2 + mapY**2 < supportRadius ** 2)
         coreMap = np.ones_like(mapX)
 

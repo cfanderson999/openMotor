@@ -4,7 +4,7 @@ import numpy as np
 import skfmm
 import mathlib
 
-from ..grain import PerforatedGrain
+from ..grain import PerforatedGrain, getCrossSectionCoordinates
 from .. import geometry
 from ..simResult import SimAlert, SimAlertLevel, SimAlertType
 from ..properties import FloatProperty
@@ -44,7 +44,8 @@ class BatesGrain(PerforatedGrain):
     # These two functions have a lot of code reuse, but it is worth it because making BATES an fmmGrain would make it
     # signficantly way slower
     def getFaceImage(self, mapDim):
-        mapX, mapY = np.meshgrid(np.linspace(-1, 1, mapDim), np.linspace(-1, 1, mapDim))
+        coords = getCrossSectionCoordinates(mapDim, self.cellCenteredMap)
+        mapX, mapY = np.meshgrid(coords, coords)
         mask = mapX**2 + mapY**2 > 1
         coreMap = np.ones_like(mapX)
 

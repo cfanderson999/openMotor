@@ -1,0 +1,443 @@
+<title>3D FMM Sweep</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+/* Layout: one column, controls above a large overlay chart, then a resolution study, heatmaps and findings. */
+:root {
+  --bg: #f4f4f1; --card: #fcfcfb; --ink: #0b0b0b; --ink2: #52514e; --rule: #e1e0db; --accent: #2a78d6;
+  --c1: #2a78d6; --c2: #eb6834; --c3: #1baf7a; --c4: #eda100; --c5: #e87ba4;
+  --r64: #86b6ef; --r96: #5598e7; --r128: #2a78d6; --r192: #1c5cab; --r256: #104281;
+  --base: #0b0b0b; --heatLo: #e8f0fb; --heatHi: #174a8c; --heatLoG: #e4f3ec; --heatHiG: #0f6b4a;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121211; --card: #1a1a19; --ink: #f2f2ee; --ink2: #b9b8b0; --rule: #34342f; --accent: #6da7ec;
+    --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181;
+    --r64: #2a78d6; --r96: #4a8fe0; --r128: #78a9ea; --r192: #aecbf3; --r256: #e3eefb;
+    --base: #f2f2ee; --heatLo: #1d2a3a; --heatHi: #86b6ef; --heatLoG: #18302a; --heatHiG: #5cc9a0;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121211; --card: #1a1a19; --ink: #f2f2ee; --ink2: #b9b8b0; --rule: #34342f; --accent: #6da7ec;
+  --c1: #3987e5; --c2: #d95926; --c3: #199e70; --c4: #c98500; --c5: #d55181;
+  --r64: #2a78d6; --r96: #4a8fe0; --r128: #78a9ea; --r192: #aecbf3; --r256: #e3eefb;
+  --base: #f2f2ee; --heatLo: #1d2a3a; --heatHi: #86b6ef; --heatLoG: #18302a; --heatHiG: #5cc9a0;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
+main { max-width: 1240px; margin: 0 auto; padding: 28px 16px 90px; }
+h1 { font-size: 28px; line-height: 1.15; margin: 0 0 6px; font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
+h2 { font-size: 19px; margin: 52px 0 4px; font-weight: 600; text-wrap: balance; }
+.sub { color: var(--ink2); max-width: 70ch; margin: 0 0 14px; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 18px 0 0; padding: 14px 0 0; border-top: 1px solid var(--rule); }
+.facts div { min-width: 0; }
+.facts b { font: 500 20px var(--mono); display: block; font-variant-numeric: tabular-nums; }
+.facts span { color: var(--ink2); font-size: 13px; }
+.bar { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: end; margin: 16px 0 10px; }
+label.field { display: grid; gap: 3px; font-size: 12px; color: var(--ink2); letter-spacing: 0.04em; text-transform: uppercase; }
+select { font: 14px var(--sans); color: var(--ink); background: var(--card); border: 1px solid var(--rule); border-radius: 4px; padding: 6px 28px 6px 9px; min-width: 150px; }
+select:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 0; }
+.tabs button { font: 500 13px var(--sans); color: var(--ink2); background: transparent; border: 1px solid var(--rule); border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+.tabs button[aria-selected="true"] { color: var(--ink); background: var(--card); border-color: var(--ink2); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
+.chip { display: inline-flex; align-items: center; gap: 7px; font: 13px var(--mono); color: var(--ink); background: var(--card); border: 1px solid var(--rule); border-radius: 999px; padding: 4px 11px 4px 9px; cursor: pointer; }
+.chip[aria-pressed="false"] { color: var(--ink2); opacity: 0.55; }
+.chip i { width: 18px; height: 0; border-top: 3px solid var(--sw); display: inline-block; }
+.chip i.dash { border-top-style: dashed; }
+.card { background: var(--card); border: 1px solid var(--rule); border-radius: 6px; padding: 12px; }
+.plot { position: relative; height: 440px; }
+.mini { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-top: 12px; }
+.mini .card h3 { font-size: 13px; margin: 0 0 6px; font-weight: 500; color: var(--ink2); }
+.mini .plot { height: 220px; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font: 13px var(--mono); font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; }
+th { color: var(--ink2); font: 500 11px var(--sans); text-transform: uppercase; letter-spacing: 0.05em; }
+td small { color: var(--ink2); margin-left: 4px; }
+.heat { display: grid; gap: 3px; min-width: 520px; }
+.heat .h { font: 500 12px var(--sans); color: var(--ink2); text-align: center; align-self: end; padding-bottom: 3px; }
+.heat .g { font: 13px var(--sans); color: var(--ink); align-self: center; padding-right: 8px; white-space: nowrap; }
+.heat button { font: 12px var(--mono); border: 0; border-radius: 3px; padding: 8px 2px; cursor: pointer; min-width: 52px; }
+.heat button[disabled] { cursor: default; background: transparent; }
+.legend { display: flex; align-items: center; gap: 8px; font: 12px var(--mono); color: var(--ink2); margin-top: 10px; }
+.legend i { flex: 0 0 180px; height: 10px; border-radius: 2px; }
+.find { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-top: 12px; }
+.find h3 { font-size: 14px; margin: 0 0 4px; }
+.find p { margin: 0; color: var(--ink2); font-size: 14px; }
+.find b { color: var(--ink); font-weight: 600; }
+.note { color: var(--ink2); font-size: 13px; margin: 8px 0 0; max-width: 80ch; }
+@media (max-width: 640px) { .plot { height: 330px; } h1 { font-size: 24px; } }
+</style>
+
+<main>
+  <h1>3D FMM against the normal simulation</h1>
+  <p class="sub">Standard grains simulated with four propellants, normally and converted to 3D FMM at map dimensions 64 to 256. Pick a case, switch runs on and off, and hover the chart to read every run at the same moment.</p>
+  <div class="facts" id="facts"></div>
+
+  <section aria-labelledby="h-compare">
+    <h2 id="h-compare">Compare runs</h2>
+    <div class="bar">
+      <label class="field" id="versionField" hidden>Area curve<select id="version"></select></label>
+      <label class="field">Grain<select id="grain"></select></label>
+      <label class="field">Propellant<select id="prop"></select></label>
+      <label class="field" id="fluxDimField" hidden>Map dimension<select id="fluxDim"></select></label>
+    </div>
+    <div class="tabs" role="tablist" id="tabs"></div>
+    <div class="chips" id="chips"></div>
+    <div class="card"><div class="plot"><canvas id="main" role="img" aria-label="Overlay of simulation runs against time"></canvas></div></div>
+    <p class="note" id="viewNote"></p>
+    <div class="scroll card" style="margin-top:12px"><table id="table"></table></div>
+  </section>
+
+  <section aria-labelledby="h-res">
+    <h2 id="h-res">Does a finer map help?</h2>
+    <p class="sub">Error against the normal simulation for the selected grain, one line per propellant. A line that flattens is a floor that more resolution does not remove. The dashed line marks 1%.</p>
+    <div class="chips" id="resChips"></div>
+    <div class="mini" id="mini"></div>
+  </section>
+
+  <section aria-labelledby="h-over">
+    <h2 id="h-over">All grains at a glance</h2>
+    <p class="sub">Click a cell to load that grain in the comparison chart.</p>
+    <div class="bar">
+      <label class="field">Measure<select id="heatMetric"></select></label>
+      <label class="field" id="heatModeField" hidden>Flux method<select id="heatMode"></select></label>
+    </div>
+    <div class="card scroll"><div class="heat" id="heat"></div><div class="legend" id="legend"></div></div>
+  </section>
+
+  <section aria-labelledby="h-find">
+    <h2 id="h-find">What the sweep shows</h2>
+    <div class="find" id="findings"></div>
+  </section>
+</main>
+
+<script type="application/json" id="data">/*DATA*/null</script>
+<script>
+(function () {
+  var ALL = JSON.parse(document.getElementById('data').textContent);
+  var META = ALL.meta, D, S, grainById = {};
+  var COL = {}; META.columns.forEach(function (c, i) { COL[c] = i; });
+  var props = META.propellants.map(function (p) { return p.id; });
+  var VERSION_LABEL = { before: 'before: slope of the smoothed volume', after: 'after: marching cubes area', sweep: 'sweep' };
+  function useVersion(v) {
+    state.version = v; D = ALL.versions[v];
+    S = new Map(D.summary.map(function (r) { return [r[0] + '|' + r[1] + '|' + r[2] + '|' + r[3], r]; }));
+    grainById = {}; D.grains.forEach(function (g) { grainById[g.id] = g; });
+  }
+  var MODES = META.modes;
+  var PSI_NOTE = 'above ' + Math.round(META.thresholdPsi) + ' psi';
+  var MODE_LABEL = { '3d-2dflux': '2D flux (massFlux3D off)', '3d-area': 'per-layer area flux', '3d-legacy-Exact': 'legacy volume fraction' };
+  var MODE_VAR = { '3d-area': '--c1', '3d-2dflux': '--c2', '3d-legacy-Exact': '--c3' };
+  var PROP_VAR = ['--c1', '--c2', '--c3', '--c4'];
+  var VIEWS = [
+    { id: 'pressure', label: 'Chamber pressure', key: 'p', unit: 'MPa', digits: 2, group: 'dims' },
+    { id: 'force', label: 'Thrust', key: 'f', unit: 'N', digits: 0, group: 'dims' },
+    { id: 'pressureErr', label: 'Pressure error', key: 'p', unit: '% of baseline peak', digits: 2, group: 'dims', err: true },
+    { id: 'forceErr', label: 'Thrust error', key: 'f', unit: '% of baseline peak', digits: 2, group: 'dims', err: true },
+    { id: 'flux', label: 'Mass flux', key: 'q', unit: 'kg/(m² s)', digits: 0, group: 'modes' },
+    { id: 'mach', label: 'Core Mach', key: 'm', unit: '', digits: 3, group: 'modes' }
+  ];
+  var NOTES = {
+    pressure: 'Solid lines are the 3D runs, dashed is the normal analytic or 2D FMM simulation. Pressure does not depend on the flux method, so each map dimension is one line.',
+    force: 'Thrust follows pressure through the same nozzle, so it shows the same differences scaled by the thrust coefficient.',
+    pressureErr: 'Difference from the baseline at each instant, as a percent of the baseline peak. The last few percent of the burn are hidden because the 0.03 s timestep makes the burnout step swing wildly.',
+    forceErr: 'Same as the pressure error, for thrust.',
+    flux: 'Peak core mass flux through the grain over time, for one map dimension. The baseline for the FMM grains is the 2D approximation; for BATES and conical grains it is exact.',
+    mach: 'Core Mach number computed from the mass flux, so it inherits the same method differences.'
+  };
+  var state = { version: META.versions[META.versions.length - 1], grain: 'bates-both', prop: props[0], view: 'pressure', dims: new Set(), base: true, fluxDim: 128, modes: new Set(['3d-area', '3d-2dflux']), heat: 'impulse', heatMode: '3d-area', hideTail: true };
+  var charts = {};
+
+  function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+  function val(g, p, m, d, c) { var r = S.get(g + '|' + p + '|' + m + '|' + d); return r ? r[COL[c]] : NaN; }
+  function median(a) { a = a.filter(isFinite).sort(function (x, y) { return x - y; }); if (!a.length) return NaN; var m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; }
+  function fmt(v, d) { return isFinite(v) ? v.toFixed(d) : '–'; }
+  function grainDims(g) { return grainById[g].dims; }
+  function el(tag, attrs, text) { var e = document.createElement(tag); for (var k in (attrs || {})) { if (k === 'class') e.className = attrs[k]; else e.setAttribute(k, attrs[k]); } if (text != null) e.textContent = text; return e; }
+
+  function selectDefaults() {
+    var dims = grainDims(state.grain);
+    state.dims = new Set(dims);
+    state.fluxDim = dims.indexOf(128) >= 0 ? 128 : dims[dims.length - 1];
+  }
+
+  // ---------- facts ----------
+  function renderFacts() {
+    var f = document.getElementById('facts'); f.textContent = '';
+    var errs = [];
+    D.grains.forEach(function (g) { if (g.dims.indexOf(128) >= 0) errs.push(medianError(g.id, 128, 'eImpulse', '3d-area')); });
+    var items = [[D.runs.toLocaleString(), 'simulations'], [D.grains.length + ' × ' + META.propellants.length, 'grains × propellants'],
+      [fmt(median(errs), 1) + '%', 'median impulse error at map 128, ' + PSI_NOTE], ['96 to 128', 'map dimension knee']];
+    items.forEach(function (it) { var d = el('div'); d.appendChild(el('b', null, it[0])); d.appendChild(el('span', null, it[1])); f.appendChild(d); });
+  }
+  function errOf(g, p, mode, d, c) {
+    var v = val(g, p, mode, d, c);
+    if (c === 'eCurve') return v;
+    var b = val(g, p, 'baseline', 750, c); return Math.abs(v / b - 1) * 100;
+  }
+  function medianError(g, d, c, mode) { return median(props.map(function (p) { return errOf(g, p, mode, d, c); })); }
+
+  // ---------- main chart ----------
+  var crosshair = { id: 'crosshair', afterDatasetsDraw: function (chart) {
+    var a = chart.tooltip && chart.tooltip.getActiveElements ? chart.tooltip.getActiveElements() : [];
+    if (!a || !a.length) return;
+    var x = a[0].element.x, ctx = chart.ctx, area = chart.chartArea;
+    ctx.save(); ctx.strokeStyle = css('--ink2'); ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x, area.top); ctx.lineTo(x, area.bottom); ctx.stroke(); ctx.restore();
+  } };
+  var tailBand = { id: 'tailBand', beforeDatasetsDraw: function (chart) {
+    var view = chart.options.plugins.tailBand; if (!view || !view.t) return;
+    var x = chart.scales.x.getPixelForValue(view.t), area = chart.chartArea; if (x >= area.right) return;
+    var ctx = chart.ctx; ctx.save(); ctx.fillStyle = css('--rule'); ctx.globalAlpha = 0.55; ctx.fillRect(x, area.top, area.right - x, area.bottom - area.top);
+    ctx.globalAlpha = 1; ctx.fillStyle = css('--ink2'); ctx.font = '11px ' + css('--sans'); ctx.textAlign = 'right'; ctx.fillText('below ' + Math.round(META.thresholdPsi) + ' psi: not judged', area.right - 6, area.top + 14); ctx.restore();
+  } };
+  function baseOptions(xTitle, yTitle, extra) {
+    var ink2 = css('--ink2'), rule = css('--rule');
+    var o = {
+      responsive: true, maintainAspectRatio: false, animation: false, normalized: true, parsing: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { display: false }, tooltip: { backgroundColor: css('--card'), titleColor: css('--ink'), bodyColor: css('--ink'), borderColor: rule, borderWidth: 1, padding: 10, bodyFont: { family: css('--mono'), size: 12 }, titleFont: { family: css('--mono'), size: 12 }, boxPadding: 4 } },
+      scales: {
+        x: { type: 'linear', title: { display: true, text: xTitle, color: ink2 }, ticks: { color: ink2, maxTicksLimit: 8 }, grid: { color: rule } },
+        y: { title: { display: true, text: yTitle, color: ink2 }, ticks: { color: ink2 }, grid: { color: rule } }
+      }
+    };
+    if (extra) extra(o);
+    return o;
+  }
+  function pointsOf(t, arr) { var out = []; for (var i = 0; i < t.length; i++) out.push({ x: t[i], y: arr[i] }); return out; }
+  function mainDatasets() {
+    var view = VIEWS.filter(function (v) { return v.id === state.view; })[0];
+    var e = D.grid[state.grain][state.prop], t = e.t, sets = [];
+    var ref = e.base[view.key];
+    var peak = Math.max.apply(null, ref.filter(function (v) { return v != null; }));
+    var tEnd = t[ref.map(function (v) { return v != null; }).lastIndexOf(true)];
+    function transform(arr) {
+      if (!view.err) return arr;
+      return arr.map(function (v, i) {
+        if (v == null || ref[i] == null) return null;
+        if (state.hideTail && t[i] > tEnd * 0.96) return null;
+        return (v - ref[i]) / peak * 100;
+      });
+    }
+    function add(label, color, arr, dash) { sets.push({ label: label, data: pointsOf(t, transform(arr)), borderColor: color, backgroundColor: color, borderWidth: dash ? 2 : 1.6, borderDash: dash ? [7, 4] : [], pointRadius: 0, pointHoverRadius: 3, spanGaps: false, tension: 0 }); }
+    if (view.group === 'dims') {
+      if (state.base && !view.err) add('baseline', css('--base'), ref, true);
+      grainDims(state.grain).forEach(function (d) { if (state.dims.has(d) && e.runs[d]) add('3D ' + d, css('--r' + d), e.runs[d][view.key]); });
+    } else {
+      if (state.base) add('baseline', css('--base'), e.base[view.key], true);
+      var flux = e.flux[state.fluxDim] || {};
+      MODES.forEach(function (m) { if (state.modes.has(m) && flux[m]) add(MODE_LABEL[m], css(MODE_VAR[m]), flux[m][view.key]); });
+    }
+    return { sets: sets, view: view };
+  }
+  function renderMain() {
+    var built = mainDatasets(), view = built.view;
+    if (charts.main) charts.main.destroy();
+    var opts = baseOptions('time [s]', view.label + (view.unit ? ' [' + view.unit + ']' : ''), function (o) {
+      o.plugins.tooltip.callbacks = {
+        title: function (items) { return 't = ' + items[0].parsed.x.toFixed(2) + ' s'; },
+        label: function (c) { var v = c.parsed.y; return ' ' + c.dataset.label + ': ' + (v == null ? '–' : v.toFixed(view.digits + (view.err ? 1 : 0)) + (view.err ? ' %' : '')); }
+      };
+      if (view.err) { o.scales.y.suggestedMin = -6; o.scales.y.suggestedMax = 6; }
+      o.plugins.tailBand = { t: val(state.grain, state.prop, 'baseline', 750, 'eBurn') };
+    });
+    charts.main = new Chart(document.getElementById('main'), { type: 'line', data: { datasets: built.sets }, options: opts, plugins: [crosshair, tailBand] });
+    document.getElementById('viewNote').textContent = NOTES[state.view];
+  }
+
+  // ---------- controls ----------
+  function renderTabs() {
+    var t = document.getElementById('tabs'); t.textContent = '';
+    VIEWS.forEach(function (v) {
+      var b = el('button', { role: 'tab', 'aria-selected': String(state.view === v.id) }, v.label);
+      b.addEventListener('click', function () { state.view = v.id; renderAll(false); });
+      t.appendChild(b);
+    });
+  }
+  function chip(label, color, pressed, dash, onClick) {
+    var b = el('button', { class: 'chip', 'aria-pressed': String(pressed), type: 'button' });
+    var sw = el('i', dash ? { class: 'dash' } : {}); sw.style.setProperty('--sw', color); b.appendChild(sw); b.appendChild(document.createTextNode(label));
+    b.addEventListener('click', onClick); return b;
+  }
+  function renderChips() {
+    var c = document.getElementById('chips'); c.textContent = '';
+    var view = VIEWS.filter(function (v) { return v.id === state.view; })[0];
+    document.getElementById('fluxDimField').hidden = view.group !== 'modes';
+    if (!(view.err && view.group === 'dims')) c.appendChild(chip('baseline', css('--base'), state.base, true, function () { state.base = !state.base; renderAll(false); }));
+    if (view.group === 'dims') {
+      grainDims(state.grain).forEach(function (d) { c.appendChild(chip('3D ' + d, css('--r' + d), state.dims.has(d), false, function () { if (state.dims.has(d)) state.dims.delete(d); else state.dims.add(d); renderAll(false); })); });
+    } else {
+      MODES.forEach(function (m) { c.appendChild(chip(MODE_LABEL[m], css(MODE_VAR[m]), state.modes.has(m), false, function () { if (state.modes.has(m)) state.modes.delete(m); else state.modes.add(m); renderAll(false); })); });
+    }
+    if (view.err) { var lab = el('label', { class: 'chip', style: 'cursor:pointer' }); var cb = el('input', { type: 'checkbox' }); cb.checked = state.hideTail; cb.addEventListener('change', function () { state.hideTail = cb.checked; renderAll(false); }); lab.appendChild(cb); lab.appendChild(document.createTextNode('hide burnout step')); c.appendChild(lab); }
+  }
+  function renderSelects() {
+    var g = document.getElementById('grain'); g.textContent = '';
+    D.grains.forEach(function (x) { var o = el('option', { value: x.id }, x.id + ' (' + x.type + ', L ' + x.length + ' m)'); if (x.id === state.grain) o.selected = true; g.appendChild(o); });
+    var p = document.getElementById('prop'); p.textContent = '';
+    META.propellants.forEach(function (x) { var o = el('option', { value: x.id }, x.id + ' (n ' + x.n + ')'); if (x.id === state.prop) o.selected = true; p.appendChild(o); });
+    var v = document.getElementById('version'); v.textContent = '';
+    META.versions.forEach(function (k) { var o = el('option', { value: k }, VERSION_LABEL[k] || k); if (k === state.version) o.selected = true; v.appendChild(o); });
+    document.getElementById('versionField').hidden = META.versions.length < 2;
+    var f = document.getElementById('fluxDim'); f.textContent = '';
+    grainDims(state.grain).forEach(function (d) { var o = el('option', { value: d }, String(d)); if (d === state.fluxDim) o.selected = true; f.appendChild(o); });
+  }
+
+  // ---------- table ----------
+  function renderTable() {
+    var t = document.getElementById('table'); t.textContent = '';
+    var view = VIEWS.filter(function (v) { return v.id === state.view; })[0];
+    var heads = ['Run', 'Grid setup s', 'Simulation s', 'Memory MB', 'Burn s', 'Peak P MPa', 'Avg P MPa', 'Impulse N·s', 'Peak Kn', 'Peak flux', 'Max Mach', 'Curve RMS %'];
+    var cols = ['setup', 'loop', 'rss', 'eBurn', 'peakP', 'eAvgP', 'eImpulse', 'peakKn', 'peakFlux', 'maxMach', 'eCurve'], digits = [1, 2, 0, 2, 2, 2, 0, 0, 0, 3, 2];
+    var hr = el('tr'); heads.forEach(function (h) { hr.appendChild(el('th', null, h)); }); t.appendChild(el('thead')).appendChild(hr);
+    var body = el('tbody'); t.appendChild(body);
+    var g = state.grain, p = state.prop;
+    var list = [];
+    if (state.base) list.push(['baseline', 'baseline', 750, css('--base')]);
+    if (view.group === 'dims') grainDims(g).forEach(function (d) { if (state.dims.has(d)) list.push(['3D ' + d, '3d-area', d, css('--r' + d)]); });
+    else MODES.forEach(function (m) { if (state.modes.has(m)) list.push([MODE_LABEL[m] + ', ' + state.fluxDim, m, state.fluxDim, css(MODE_VAR[m])]); });
+    list.forEach(function (row) {
+      var tr = el('tr'), first = el('td'); var sw = el('i'); sw.style.cssText = 'display:inline-block;width:14px;border-top:3px solid ' + row[3] + ';margin-right:8px;vertical-align:middle'; first.appendChild(sw); first.appendChild(document.createTextNode(row[0])); tr.appendChild(first);
+      cols.forEach(function (c, i) {
+        var td = el('td'), v = val(g, p, row[1], row[2], c);
+        if (c === 'setup' && row[1] === 'baseline') { td.textContent = fmt(v, 2); }
+        else td.textContent = fmt(v, digits[i]);
+        if (row[1] !== 'baseline' && ['eBurn', 'peakP', 'eAvgP', 'eImpulse', 'peakKn', 'peakFlux', 'maxMach'].indexOf(c) >= 0) {
+          var b = val(g, p, 'baseline', 750, c), d = (v / b - 1) * 100;
+          if (isFinite(d)) td.appendChild(el('small', null, (d >= 0 ? '+' : '') + d.toFixed(1) + '%'));
+        }
+        tr.appendChild(td);
+      });
+      body.appendChild(tr);
+    });
+  }
+
+  // ---------- resolution study ----------
+  var MINI = [['eImpulse', 'Impulse error, ' + PSI_NOTE + ' [%]'], ['eAvgP', 'Average pressure error, ' + PSI_NOTE + ' [%]'], ['eCurve', 'Pressure curve RMS, ' + PSI_NOTE + ' [% of peak]'], ['peakP', 'Peak pressure error [%]'], ['peakKn', 'Peak Kn error [%]']];
+  function renderMini() {
+    var root = document.getElementById('mini'); root.textContent = '';
+    ['mini0', 'mini1', 'mini2', 'mini3', 'mini4', 'mini5', 'mini6'].forEach(function (k) { if (charts[k]) charts[k].destroy(); });
+    var dims = grainDims(state.grain), labels = dims.map(String);
+    function card(title, key, datasets, log, yTitle) {
+      var c = el('div', { class: 'card' }); c.appendChild(el('h3', null, title)); var plot = el('div', { class: 'plot' }); var cv = el('canvas'); plot.appendChild(cv); c.appendChild(plot); root.appendChild(c);
+      var opts = baseOptions('3D map dimension', yTitle, function (o) {
+        o.parsing = true; o.scales.x = { type: 'category', title: { display: true, text: '3D map dimension', color: css('--ink2') }, ticks: { color: css('--ink2') }, grid: { color: css('--rule') } };
+        if (log) { o.scales.y.type = 'logarithmic'; o.scales.y.min = 0.01; o.scales.y.ticks.callback = function (v) { return [0.01, 0.1, 1, 10, 100].indexOf(v) >= 0 ? v : ''; }; }
+        o.plugins.tooltip.callbacks = { label: function (c) { return ' ' + c.dataset.label + ': ' + (+c.parsed.y).toPrecision(3); } };
+      });
+      charts[key] = new Chart(cv, { type: 'line', data: { labels: labels, datasets: datasets }, options: opts, plugins: [crosshair] });
+    }
+    MINI.forEach(function (m, i) {
+      var sets = props.map(function (p, j) {
+        return { label: p, data: dims.map(function (d) { return Math.max(errOf(state.grain, p, '3d-area', d, m[0]), 0.01); }), borderColor: css(PROP_VAR[j]), backgroundColor: css(PROP_VAR[j]), borderWidth: 1.6, pointRadius: 3, tension: 0 };
+      });
+      sets.push({ label: '1%', data: dims.map(function () { return 1; }), borderColor: css('--ink2'), borderDash: [4, 4], borderWidth: 1, pointRadius: 0 });
+      card(m[1], 'mini' + i, sets, true, 'error [%]');
+    });
+    var setup = { label: 'grid setup', data: dims.map(function (d) { return median(props.map(function (p) { return val(state.grain, p, '3d-area', d, 'setup'); })); }), borderColor: css('--c1'), backgroundColor: css('--c1'), borderWidth: 1.6, pointRadius: 3 };
+    var loop = { label: 'one simulation', data: dims.map(function (d) { return median(props.map(function (p) { return val(state.grain, p, '3d-area', d, 'loop'); })); }), borderColor: css('--c2'), backgroundColor: css('--c2'), borderWidth: 1.6, pointRadius: 3 };
+    var baseTotal = median(props.map(function (p) { return val(state.grain, p, 'baseline', 750, 'setup') + val(state.grain, p, 'baseline', 750, 'loop'); }));
+    var baseLine = { label: 'normal simulation', data: dims.map(function () { return baseTotal; }), borderColor: css('--base'), borderDash: [6, 4], borderWidth: 1.4, pointRadius: 0 };
+    card('Time per run [s]', 'mini5', [setup, loop, baseLine], true, 'seconds');
+    charts.mini5.options.scales.y.min = 0.01;
+    var mem = { label: 'peak memory', data: dims.map(function (d) { return median(props.map(function (p) { return val(state.grain, p, '3d-area', d, 'rss'); })); }), borderColor: css('--c3'), backgroundColor: css('--c3'), borderWidth: 1.6, pointRadius: 3 };
+    card('Peak memory [MB]', 'mini6', [mem], false, 'MB');
+    charts.mini5.update();
+  }
+  function renderResChips() {
+    var c = document.getElementById('resChips'); c.textContent = '';
+    props.forEach(function (p, j) { var b = el('span', { class: 'chip', 'aria-pressed': 'true' }); var sw = el('i'); sw.style.setProperty('--sw', css(PROP_VAR[j])); b.appendChild(sw); b.appendChild(document.createTextNode(p + ' (n ' + META.propellants[j].n + ')')); b.style.cursor = 'default'; c.appendChild(b); });
+  }
+
+  // ---------- heatmap ----------
+  var HEAT = {
+    impulse: { label: 'Impulse error, ' + PSI_NOTE + ' [%]', f: function (g, d) { return medianError(g, d, 'eImpulse', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
+    avgP: { label: 'Average pressure error, ' + PSI_NOTE + ' [%]', f: function (g, d) { return medianError(g, d, 'eAvgP', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
+    curve: { label: 'Pressure curve RMS, ' + PSI_NOTE + ' [% of peak]', f: function (g, d) { return medianError(g, d, 'eCurve', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
+    peakP: { label: 'Peak pressure error [%]', f: function (g, d) { return medianError(g, d, 'peakP', '3d-area'); }, lo: 0.3, hi: 15, d: 1, fam: 'b' },
+    peakKn: { label: 'Peak Kn error [%]', f: function (g, d) { return medianError(g, d, 'peakKn', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
+    burn: { label: 'Burn time error, ' + PSI_NOTE + ' [%]', f: function (g, d) { return medianError(g, d, 'eBurn', '3d-area'); }, lo: 0.3, hi: 6, d: 1, fam: 'b' },
+    peakFlux: { label: 'Peak mass flux error [%]', f: function (g, d) { return medianError(g, d, 'peakFlux', state.heatMode); }, lo: 1, hi: 60, d: 0, fam: 'b', modes: true },
+    maxMach: { label: 'Max core Mach error [%]', f: function (g, d) { return medianError(g, d, 'maxMach', state.heatMode); }, lo: 1, hi: 60, d: 0, fam: 'b', modes: true },
+    setup: { label: 'Grid setup time [s]', f: function (g, d) { return median(props.map(function (p) { return val(g, p, '3d-area', d, 'setup'); })); }, lo: 0.1, hi: 150, d: 1, fam: 'g' },
+    rss: { label: 'Peak memory [MB]', f: function (g, d) { return median(props.map(function (p) { return val(g, p, '3d-area', d, 'rss'); })); }, lo: 100, hi: 2500, d: 0, fam: 'g' },
+    ratio: { label: '3D time ÷ normal simulation time', f: function (g, d) { return median(props.map(function (p) { return (val(g, p, '3d-area', d, 'setup') + val(g, p, '3d-area', d, 'loop')) / (val(g, p, 'baseline', 750, 'setup') + val(g, p, 'baseline', 750, 'loop')); })); }, lo: 1, hi: 1500, d: 0, fam: 'g', suffix: '×' }
+  };
+  function mix(a, b, t) { return a.map(function (v, i) { return Math.round(v + (b[i] - v) * t); }); }
+  function rgb(hex) { var h = hex.replace('#', ''); return [0, 2, 4].map(function (i) { return parseInt(h.substr(i, 2), 16); }); }
+  function renderHeat() {
+    var m = HEAT[state.heat], root = document.getElementById('heat'); root.textContent = '';
+    document.getElementById('heatModeField').hidden = !m.modes;
+    var dims = [64, 96, 128, 192, 256];
+    root.style.gridTemplateColumns = 'minmax(130px,auto) repeat(' + dims.length + ', 1fr)';
+    root.appendChild(el('div', { class: 'h' }));
+    dims.forEach(function (d) { root.appendChild(el('div', { class: 'h' }, String(d))); });
+    var lo = rgb(css(m.fam === 'b' ? '--heatLo' : '--heatLoG')), hi = rgb(css(m.fam === 'b' ? '--heatHi' : '--heatHiG'));
+    D.grains.forEach(function (g) {
+      root.appendChild(el('div', { class: 'g' }, g.id));
+      dims.forEach(function (d) {
+        var b = el('button', { type: 'button' });
+        if (g.dims.indexOf(d) < 0) { b.disabled = true; root.appendChild(b); return; }
+        var v = m.f(g.id, d), t = Math.min(1, Math.max(0, (Math.log(Math.max(v, m.lo)) - Math.log(m.lo)) / (Math.log(m.hi) - Math.log(m.lo))));
+        var c = mix(lo, hi, t); b.style.background = 'rgb(' + c.join(',') + ')';
+        var lum = (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) / 255; b.style.color = lum < 0.55 ? '#ffffff' : '#0b0b0b';
+        b.textContent = fmt(v, m.d) + (m.suffix || '');
+        b.title = g.id + ', map ' + d + ': ' + fmt(v, 2);
+        b.addEventListener('click', function () { state.grain = g.id; selectDefaults(); state.dims = new Set([d]); state.fluxDim = d; renderAll(true); document.getElementById('h-compare').scrollIntoView({ behavior: 'smooth' }); });
+        root.appendChild(b);
+      });
+    });
+    var lg = document.getElementById('legend'); lg.textContent = '';
+    lg.appendChild(el('span', null, fmt(m.lo, m.lo < 1 ? 1 : 0)));
+    var bar = el('i'); bar.style.background = 'linear-gradient(90deg, rgb(' + lo.join(',') + '), rgb(' + hi.join(',') + '))'; lg.appendChild(bar);
+    lg.appendChild(el('span', null, fmt(m.hi, 0) + (m.suffix || '') + ' (log scale)'));
+  }
+  function renderHeatSelects() {
+    var s = document.getElementById('heatMetric'); s.textContent = '';
+    Object.keys(HEAT).forEach(function (k) { var o = el('option', { value: k }, HEAT[k].label); if (k === state.heat) o.selected = true; s.appendChild(o); });
+    var m = document.getElementById('heatMode'); m.textContent = '';
+    MODES.forEach(function (k) { var o = el('option', { value: k }, MODE_LABEL[k]); if (k === state.heatMode) o.selected = true; m.appendChild(o); });
+  }
+
+  // ---------- findings ----------
+  function renderFindings() {
+    var items = [
+      ['Accuracy is good and flat past map 96', 'Median impulse error is <b>1.0 to 1.6%</b> at every map dimension and average pressure error falls from 2.4% at 64 to 0.9% at 256. The worst impulse error is 6.1% at 64 and about 2.5% from 128 up.'],
+      ['Peak values hit a floor', 'The moon burner stays <b>11 to 13%</b> off on peak pressure from 64 to 256 and its curves are nearly identical across resolutions. The area curve is the slope of a volume curve sampled at 50 points and smoothed over about 40% of the web, so sharp events are rounded off at any resolution.'],
+      ['More smoothing points is not the fix', 'Raising the sample count to 150 cuts the moon burner peak error from 11.9% to 1.1%, but at 400 points the raw derivative gets noisy enough that simulations fail. The per-layer areas or a smoothing width set in voxels are better candidates.'],
+      ['Flux has a start-up bias', 'For BATES and conical grains the exact reference shows <b>+15 to 20%</b> flux early in the burn and about 10% low at the end. The early part comes from the area at zero regression and does not shrink with resolution.'],
+      ['The flux quality modes are redundant', 'Exact, Fast and Faster peak flux differ by at most 1.1%, they are not faster, and the per-layer flux ignores the setting. The per-layer flux has less error in <b>57 of 66</b> grain and resolution cases and is about 2.7× faster per call.'],
+      ['Finer maps cost more than they return', 'Setup time grows with voxels to the power 1.12 and memory is linear: 0.5 s at map 64, 3.5 s at 128, 13 s at 192 and 33 s at 256, reaching 1.35 GB. Map <b>96 to 128</b> is the knee. The 3D run is 4× to 79× the 2D FMM time at 128 to 256 and hundreds of times the analytic grains.']
+    ];
+    var root = document.getElementById('findings');
+    items.forEach(function (it) { var d = el('div'); d.appendChild(el('h3', null, it[0])); var p = el('p'); p.innerHTML = it[1]; d.appendChild(p); root.appendChild(d); });
+  }
+
+  function renderAll(resetSelects) {
+    if (resetSelects) renderSelects();
+    renderTabs(); renderChips(); renderMain(); renderTable(); renderMini(); renderResChips();
+  }
+
+  document.getElementById('grain').addEventListener('change', function (e) { state.grain = e.target.value; selectDefaults(); renderAll(true); });
+  document.getElementById('version').addEventListener('change', function (e) { useVersion(e.target.value); if (!grainById[state.grain]) state.grain = D.grains[0].id; selectDefaults(); renderFacts(); renderAll(true); renderHeat(); });
+  document.getElementById('prop').addEventListener('change', function (e) { state.prop = e.target.value; renderAll(false); });
+  document.getElementById('fluxDim').addEventListener('change', function (e) { state.fluxDim = +e.target.value; renderAll(false); });
+  document.getElementById('heatMetric').addEventListener('change', function (e) { state.heat = e.target.value; renderHeat(); });
+  document.getElementById('heatMode').addEventListener('change', function (e) { state.heatMode = e.target.value; renderHeat(); });
+  function themeChanged() { Chart.defaults.font.family = css('--sans'); renderAll(false); renderHeat(); }
+  if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', themeChanged);
+  new MutationObserver(themeChanged).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+  Chart.defaults.font.family = css('--sans');
+  useVersion(state.version); selectDefaults(); renderFacts(); renderSelects(); renderHeatSelects(); renderAll(true); renderHeat(); renderFindings();
+})();
+</script>

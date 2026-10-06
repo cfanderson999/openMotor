@@ -4,3 +4,4 @@ from .nozzle import *
 from .propellant import *
 from .grains import *
 from .srm1d import *
+from .converted3d import *

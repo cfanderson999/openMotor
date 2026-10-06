@@ -4,6 +4,7 @@ should be instantiated directly.
 """
 
 from abc import abstractmethod
+import copy
 import hashlib
 import os
 import pathlib
@@ -14,7 +15,7 @@ from typing import Tuple, List, Union
 
 import numpy as np
 import skfmm
-from scipy import interpolate
+from scipy import interpolate, ndimage
 from scipy.signal import savgol_filter
 from skimage import measure
 
@@ -37,6 +38,12 @@ try:
     _hasMarchCy = True
 except ImportError:
     _hasMarchCy = False
+
+try:
+    from mathlib._march import marching_area_pixels_by_layer as _marchingLayerAreas
+    _hasLayerAreas = True
+except ImportError:
+    _hasLayerAreas = False
 
 from . import geometry
 from .properties import EnumProperty, FloatProperty, BooleanProperty, PropertyCollection
@@ -95,6 +102,15 @@ if _hasMarchCy:
 class _GrainSetupCanceled(Exception):
     """Raised when a grain setup operation (voxelization / regression map build)
     is aborted by the user via a cancelCheck callback."""
+
+
+def getCrossSectionCoordinates(mapDim: int, cellCentered: bool = False) -> np.ndarray:
+    """Returns the position of every pixel along one axis of a cross section image, with the casting tube wall at
+    radius 1. Pixels are 1/mapDim of the diameter wide, so cell centered coordinates, (2i + 1) / mapDim - 1, give an
+    exact scale. The default puts the first and last pixel on the wall, which is the layout of the 2D grains."""
+    if cellCentered:
+        return (2 * np.arange(mapDim) + 1) / mapDim - 1
+    return np.linspace(-1, 1, mapDim)
 
 
 class Grain(PropertyCollection):
@@ -198,6 +214,17 @@ class Grain(PropertyCollection):
     def getInitialLength(self) -> float:
         """Returns the length of the grain before any burning has begun"""
 
+    def convertTo3D(self) -> "Grain":
+        """Returns a 3D FMM grain with this grain's geometry, or the grain itself if it is already 3D or has no 3D
+        equivalent."""
+        return self
+
+    def getExtrudedMask(self, mapDim: int) -> np.ndarray:
+        """Returns the cross section mask (True is outside the grain) used when this grain is converted to 3D. The
+        default masks everything outside the casting tube."""
+        coords = getCrossSectionCoordinates(mapDim, cellCentered=True)
+        return coords[:, None] ** 2 + coords[None, :] ** 2 > 1
+
     def getRegressedLength(self, regDist: float) -> float:
         """
         Returns the length of the grain when it has regressed a distance of 'regDist',
@@ -267,6 +294,32 @@ class PerforatedGrain(Grain):
             "Inhibited ends", ["Neither", "Top", "Bottom", "Both"]
         )
         self.wallWeb: float = 0  # Max distance from the core to the wall
+        self.cellCenteredMap = False  # Set when a 3D conversion needs the exact pixel scale
+
+    def _getResampledFaceImage(self, mapDim: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Returns the cross section as a (propellant, masked) pair of boolean images with resolution mapDim."""
+        faceDim = max(mapDim, 64)  # Some grains cannot draw their face below this resolution
+        source = copy.deepcopy(self)
+        source.cellCenteredMap = True
+        face = source.getFaceImage(faceDim)
+        propellant, masked = np.ma.getdata(face) > 0.5, np.ma.getmaskarray(face)
+        if faceDim != mapDim:
+            index = ((np.arange(mapDim) + 0.5) * faceDim / mapDim).astype(int)
+            propellant, masked = propellant[np.ix_(index, index)], masked[np.ix_(index, index)]
+        return propellant, masked
+
+    def getExtrudedCoreMap(self, mapLength: int, mapDim: int) -> np.ndarray:
+        """Returns the grain's 3D core map (True is propellant), shape (mapLength, mapDim, mapDim), with the aft end
+        at index 0. The default extrudes the cross section from 'getFaceImage' along the grain."""
+        propellant, _ = self._getResampledFaceImage(mapDim)
+        return np.broadcast_to(propellant, (mapLength, mapDim, mapDim)).copy()
+
+    def getExtrudedMask(self, mapDim: int) -> np.ndarray:
+        """Masks the same regions as the grain's own face image, such as the support inside a rod and tube grain."""
+        return self._getResampledFaceImage(mapDim)[1]
+
+    def convertTo3D(self) -> "Grain":
+        return ConvertedGrain(self, self.props["inhibitedEnds"].getValue())
 
     def getEndPositions(self, regDist: float) -> Tuple[float, float]:
         if self.props["inhibitedEnds"].getValue() == "Neither":  # Neither
@@ -456,9 +509,8 @@ class FmmGrain(PerforatedGrain):
         if mapDim < 64:  # TODO convert int value into meaningful constant
             raise ValueError("Map dimension must be 64 or larger to get good results")
         self.mapDim = mapDim
-        self.mapX, self.mapY = np.meshgrid(
-            np.linspace(-1, 1, self.mapDim), np.linspace(-1, 1, self.mapDim)
-        )
+        coords = getCrossSectionCoordinates(self.mapDim, self.cellCenteredMap)
+        self.mapX, self.mapY = np.meshgrid(coords, coords)
         self.mask = self.mapX**2 + self.mapY**2 > 1
         self.coreMap = np.ones_like(self.mapX)
         self.regressionMap = None
@@ -564,14 +616,21 @@ class FmmGrain(PerforatedGrain):
 
 class Fmm3DGrain(Grain):
     """A grain that uses a 3D version of the fast marching method to calculate its regression. All a subclass has to do
-    is provide an implementation of generateCoreMap that makes a 3D model of the grain and core."""
+    is provide an implementation of generateCoreMap that makes a 3D model of the grain and core.
+
+    Axis 0 of the core map, the regression map and the mask runs from the aft (nozzle) end at index 0 to the fore
+    (head) end at the highest index. Gas flows toward index 0, so the mass flow through a slice is the mass burned
+    at or ahead of it. 'Bottom' inhibits the end at index 0 and 'Top' the end at the highest index."""
     geomName = None
 
     # ---- FMM distance-field disk cache -----------------------------------
     # skfmm.distance() on a 128³ grid takes 2–10 s; a disk cache eliminates
     # the cost on repeat runs (app restart, parameter sweep with fixed geometry).
     # Cache files are stored as .npy under the system temp directory.
-    _FMM_DIST_CACHE_VERSION = '2'   # bump to invalidate all cached entries
+    AREA_CURVE_POINTS = 50  # Samples of the volume curve whose slope gives the burning area
+    CURVES_FROM_AREA = True  # Burning area comes from marching cubes areas instead of the slope of the volume curve
+    SIGNED_DISTANCE = True  # Regression map is a signed distance with the surface at zero, not a distance from void voxel centers
+    _FMM_DIST_CACHE_VERSION = '4'   # bump to invalidate all cached entries
     _FMM_DIST_CACHE_DIR: 'pathlib.Path | None' = None
 
     @classmethod
@@ -583,15 +642,27 @@ class Fmm3DGrain(Grain):
         return cls._FMM_DIST_CACHE_DIR
 
     @staticmethod
-    def _computeFmmCacheKey(coreMapUninhib: np.ndarray, cellSize: float) -> str:
-        """SHA-256 fingerprint of the FMM inputs → hex string cache key."""
+    def _computeFmmCacheKey(coreMapUninhib: np.ndarray, cellSize: float, mask: 'np.ndarray | None' = None) -> str:
+        """SHA-256 fingerprint of the FMM inputs → hex string cache key. The mask is part of the key because it
+        decides which voxels the distance field covers, so the same core map can need different distances."""
         # Use buffer protocol directly — avoids a full .tobytes() copy that
         # would double memory usage on large 3-D grids (mapDim=256 → ~66 MB).
         arr = np.ascontiguousarray(coreMapUninhib, dtype=np.uint8)
         h = hashlib.sha256()
         h.update(arr.data)       # memoryview — no copy
         h.update(struct.pack('>d', cellSize))
+        if mask is not None:
+            h.update(struct.pack('>3q', *mask.shape))
+            maskBits = mask[0] if mask.ndim == 3 and mask.strides[0] == 0 else mask  # One slice stands for a prism
+            h.update(np.packbits(np.ascontiguousarray(maskBits, dtype=bool)).data)
         return h.hexdigest()
+
+    def _getMaskSignature(self):
+        """Cheap fingerprint of the mask for the in-memory regression map cache."""
+        if self.mask is None:
+            return None
+        maskBits = self.mask[0] if self.mask.strides[0] == 0 else self.mask
+        return (self.mask.shape, int(np.count_nonzero(maskBits)))
 
     def _loadFmmCache(self, key: str) -> 'np.ndarray | None':
         path = self._getFmmCacheDir() / f'{key}_v{self._FMM_DIST_CACHE_VERSION}.npy'
@@ -645,6 +716,12 @@ class Fmm3DGrain(Grain):
         # distance (common in high-step-count sims) are free.
         self._capCache: 'OrderedDict' = OrderedDict()  # (mapDist_q, startPos, endPos) → int64 array
         self._capCacheMax: int = 32
+        # Burning area of each layer of voxels between adjacent z-slices, sampled at the marching cubes levels:
+        # _layerAreas[i, k] is the area in pixels^2 of layer k at regression map level _layerLevels[i].
+        self._layerLevels = None
+        self._layerAreas = None
+        self._layerOffset = 0  # Index of the first stored slice within the layers, which include any end disks
+        self._areaShortfall = None  # Share of the propellant volume the marching cubes areas miss, mostly the wall sliver
 
     # ---- Bitpacked coreMap storage ------------------------------------------
     # Large STL grains can yield bool coreMap arrays of 100+ MB.  Bool and uint8
@@ -737,12 +814,11 @@ class Fmm3DGrain(Grain):
         # mcMask is an alias into self._mcMaskBuf; callers must not retain the reference
         # past the next call to _getMeshedMarchingMask (the buffer is reused each call).
         mcMask = self._mcMaskBuf
-        # Include only valid (inside-cylinder) voxels in slices 0..zPos.
-        # Slices zPos+1..end remain False so MC stops at the measurement plane.
-        # Previously mcMask[0:zPos+1] was all-True, which incorrectly included
-        # outside-cylinder voxels and generated spurious iso-surface patches that
-        # caused jagged mass-flux output as regDist advanced.
-        mcMask[:zPos + 1] = self._validMask[:zPos + 1]
+        # Include only valid (inside-cylinder) voxels in slices zPos..end, which are the slices whose burning surface
+        # feeds the flow at the measurement plane (gas flows toward the aft end at index 0). Slices before zPos
+        # remain False so MC stops at the measurement plane. Including the outside-cylinder voxels generated
+        # spurious iso-surface patches that caused jagged mass-flux output as regDist advanced.
+        mcMask[zPos:] = self._validMask[zPos:]
 
         return mcMask, zPos
 
@@ -753,6 +829,102 @@ class Fmm3DGrain(Grain):
         if quality == 'Faster':
             return 3
         return 1
+
+    def _getCurvesFromAreas(self, levels, areas, propellantVolume, maxDist):
+        """Burning area and propellant volume against regression from the marching cubes areas at each level.
+
+        The areas are resampled at half voxel spacing and lightly smoothed. Marching cubes surfaces stop where the last
+        voxel centers are, up to a voxel short of the casting wall, so the integral of the area falls a little short of
+        the propellant volume. That shortfall is the last sliver at the wall, so the curve is extended to burnout at
+        the final burning area instead of being rescaled. The volume is the integral of the area, which keeps mass and
+        burning area consistent. Returns (regression map levels, volumes, areas, shortfall fraction), or None when the
+        shortfall is above 12% of the volume and the areas cannot be trusted."""
+        levels, areas = np.asarray(levels, dtype=float), np.asarray(areas, dtype=float)
+        order = np.argsort(levels)
+        levels, areas = levels[order], areas[order]
+        distinct = np.concatenate([[True], np.diff(levels) > 1e-9])
+        levels, areas = levels[distinct], areas[distinct]
+        if len(levels) < 4 or areas.max() <= 0 or propellantVolume <= 0:
+            return None
+        step = 1.0 / self.mapDim  # Half a voxel in regression map units
+        grid = np.linspace(0.0, maxDist, max(int(np.ceil(maxDist / step)) + 1, 50))
+        area = np.nan_to_num(interpolate.PchipInterpolator(levels, areas, extrapolate=False)(grid), nan=0.0)
+        if grid.size >= 7:
+            area = savgol_filter(area, 5, 3)
+        area = np.maximum(area, 0.0)
+        toMeters = 0.5 * self.props['diameter'].getValue()
+        integral = np.trapz(area, grid * toMeters)
+        shortfall = (propellantVolume - integral) / propellantVolume
+        if not -0.12 < shortfall < 0.12:
+            return None
+        if shortfall > 0:
+            burning = np.nonzero(area > 0.02 * area.max())[0]
+            lastArea = float(area[burning[-1]])
+            extra = (propellantVolume - integral) / lastArea / toMeters  # Extra regression, in map units
+            grid = np.concatenate([grid, grid[-1] + np.arange(1, int(np.ceil(extra / step)) + 1) * step])
+            area = np.concatenate([area, np.full(grid.size - area.size, lastArea)])
+            area[area.size - 1] = 0.0
+            self._maxPolledDist = float(grid[-1])
+        regression = grid * toMeters
+        consumed = np.concatenate([[0.0], np.cumsum(0.5 * (area[1:] + area[:-1]) * np.diff(regression))])
+        volume = np.maximum(propellantVolume - consumed, 0.0)
+        volume[-1] = 0.0
+        return grid, volume, area, shortfall
+
+    @staticmethod
+    def _getAftPortCount(counts) -> int:
+        """Core voxel count at the aft end, from the counts of the first few slices. A solid end cap has little or no
+        core, so slices below half of the best one are skipped. A tapering core keeps its true area at the aft face."""
+        counts = np.asarray(counts)
+        if counts.size == 0 or counts.max() <= 0:
+            return 0
+        return int(counts[np.argmax(counts >= 0.5 * counts.max())])
+
+    def _getAreaFractionFore(self, mapDist):
+        """Returns, for each slice of the regression map, the fraction of the burning surface that lies at or ahead
+        of it (toward the fore end). Gas flows toward the aft end at index 0, so this is the share of the grain's
+        mass flow that has passed that slice. Returns None when the layer areas are not available."""
+        if self._layerAreas is None:
+            return None
+        levels = self._layerLevels
+        if len(levels) < 2 or mapDist >= levels[-1]:
+            return None
+        i = int(np.clip(np.searchsorted(levels, mapDist, side='right') - 1, 0, len(levels) - 2))
+        weight = float(np.clip((mapDist - levels[i]) / (levels[i + 1] - levels[i]), 0.0, 1.0))
+        layers = (1 - weight) * self._layerAreas[i] + weight * self._layerAreas[i + 1]
+        total = float(layers.sum())
+        if total <= 0:
+            return None
+        ahead = np.concatenate([np.cumsum(layers[::-1])[::-1], [0.0]])
+        return ahead[self._layerOffset:self._layerOffset + self.regressionMap.shape[0]] / total
+
+    def _getCoreCounts(self, mapDist, startPos, endPos):
+        """Core voxel count of every slice from startPos to endPos, cached for repeated queries at one depth."""
+        regressionMap = self._regressionMapF64 if self._regressionMapF64 is not None else self.regressionMap
+        maskU8 = self._maskU8 if self._maskU8 is not None else self.mask
+        key = (round(float(mapDist), 6), startPos, endPos)
+        counts = self._capCache.get(key)
+        if counts is None:
+            counts = get_core_area_profile(regressionMap, maskU8, mapDist, startPos, endPos)
+            self._capCache[key] = counts
+            self._capCache.move_to_end(key)
+            if len(self._capCache) > self._capCacheMax:
+                self._capCache.popitem(last=False)
+        return counts
+
+    def _getPeakFluxByArea(self, massIn, dTime, regDist, dRegDist, density, startPos, endPos):
+        """Peak mass flux over slices startPos..endPos using the distribution of the burning surface along the grain.
+        Returns None when that distribution is unavailable."""
+        mapDist = self.normalize(regDist)
+        fractions = self._getAreaFractionFore(mapDist)
+        if fractions is None or not _hasFmm3dCy:
+            return None
+        counts = self._getCoreCounts(mapDist, startPos, endPos)
+        positions = np.arange(startPos, endPos + 1)
+        coreArea = self.mapToArea(counts.astype(float))
+        massFlow = massIn + fractions[positions] * self.getSurfaceAreaAtRegression(regDist) * dRegDist * density / dTime
+        usable = coreArea > 0
+        return float((massFlow[usable] / coreArea[usable]).max()) if usable.any() else 0.0
 
     def _getMeshedPeakSearchCandidates(self, startPos, endPos, massIn, dTime, regDist, dRegDist, density):
         """Return candidate z-positions for peak-flux search in meshed 3D mode.
@@ -765,12 +937,12 @@ class Fmm3DGrain(Grain):
         port still dominates and the selection remains accurate in practice.
 
         getMassFlux computes:
-            (massIn + density · cumulativeBurnArea(0..z) · dReg) / (coreArea(z) · dTime)
+            (massIn + density · burnAreaAhead(z) · dReg) / (coreArea(z) · dTime)
 
-        Within a run of geometrically identical slices (same core-area count), coreArea is
-        constant while cumulativeBurnArea strictly increases → mass flux is strictly
-        increasing through the run.  Therefore only the **last (foremost) slice** of each
-        identical run can be a peak; earlier slices in the same run are dominated.
+        where burnAreaAhead(z) is the burning surface from slice z to the fore end.  Within a run of
+        geometrically identical slices (same core-area count), coreArea is constant while burnAreaAhead
+        strictly decreases with index → mass flux is strictly decreasing through the run.  Therefore only the
+        **first (aftmost) slice** of each identical run can be a peak; later slices in the same run are dominated.
 
         For continuously-varying geometries (conical, tapered), each run degenerates to a
         single slice.  The voxelization of a smooth cone produces small staircase oscillations
@@ -870,11 +1042,12 @@ class Fmm3DGrain(Grain):
 
         quality = self.props['meshedMassFluxQuality'].getValue()
 
-        # Collapse each constant-area run to its foremost (last) slice.
-        # Within a run, flux is strictly increasing, so only the last slice can be peak.
+        # Collapse each constant-area run to its aftmost (first) slice.
+        # Gas flows toward the aft end at index 0, so within a run the mass flow only grows toward index 0 while the
+        # core area is constant. Only the first slice of a run can be the peak.
         runEnds = []   # local indices (0-based from startPos)
         for i in range(n):
-            if i == n - 1 or coreCounts[i] != coreCounts[i + 1]:
+            if i == 0 or coreCounts[i] != coreCounts[i - 1]:
                 runEnds.append(i)
 
         # If a cap transition was found, restrict runEnds, coreCounts, and n to
@@ -991,11 +1164,11 @@ class Fmm3DGrain(Grain):
         if _packed is not None:
             _shape  = self.__dict__['_coreMapShape']
             _sum    = self.__dict__.get('_coreMapSum', 0)
-            cacheKey = (_shape, _sum, self.props['inhibitedEnds'].getValue(), self.mapDim)
+            cacheKey = (_shape, _sum, self.props['inhibitedEnds'].getValue(), self.mapDim, self._getMaskSignature())
         else:
             cacheKey = self._makeCoreMapCacheKey(
                 self.coreMap, self.props['inhibitedEnds'].getValue(), self.mapDim
-            )
+            ) + (self._getMaskSignature(),)
         if cacheKey == self._regressionMapCacheKey and self.regressionMap is not None:
             return  # coreMap unchanged — reuse existing regressionMap
 
@@ -1020,16 +1193,20 @@ class Fmm3DGrain(Grain):
         if self.props['inhibitedEnds'].getValue() in ['Bottom', 'Neither']:# TOP
             coreMapUninhib = np.append(coreMapUninhib, uninhibitedDisk, axis=0)
         if self.props['inhibitedEnds'].getValue() != 'Both':
-            _xm, _ym = np.meshgrid(
-                np.linspace(-1, 1, _cm_ydim), np.linspace(-1, 1, _cm_xdim), indexing='ij'
-            )
-            mask = np.broadcast_to(
-                (_xm**2 + _ym**2 > 1)[np.newaxis, :, :], coreMapUninhib.shape
-            )
+            if self.mask is not None and self.mask.strides[0] == 0:
+                # The mask is the same on every slice, so the disks can reuse it. This keeps any extra masked
+                # region, such as the hollow support inside the rod of a rod and tube grain.
+                outside = self.mask[0]
+            else:
+                _xm, _ym = np.meshgrid(
+                    getCrossSectionCoordinates(_cm_ydim, True), getCrossSectionCoordinates(_cm_xdim, True), indexing='ij'
+                )
+                outside = _xm**2 + _ym**2 > 1
+            mask = np.broadcast_to(outside[np.newaxis, :, :], coreMapUninhib.shape)
         valid = np.logical_not(mask)
 
         cellSize = 1 / self.mapDim
-        _fmmKey = self._computeFmmCacheKey(coreMapUninhib, cellSize)
+        _fmmKey = self._computeFmmCacheKey(coreMapUninhib, cellSize, mask)
         regressionMapUninhib = self._loadFmmCache(_fmmKey)
         if regressionMapUninhib is None:
             # Apply the cylinder mask so skfmm skips outside-cylinder voxels.
@@ -1037,7 +1214,13 @@ class Fmm3DGrain(Grain):
             # it the FMM propagates through ~21 % extra corner voxels and can't
             # terminate early at the cylinder boundary.
             _maskFull = np.ascontiguousarray(mask)
-            _maskedPhi = np.ma.MaskedArray(coreMapUninhib, _maskFull)
+            if self.SIGNED_DISTANCE:
+                # With propellant +1 and void -1 the surface lies halfway between voxel centers, so a distance of zero
+                # is the real surface. Measuring from the void voxel centers instead puts it half a voxel inside the
+                # propellant and makes the first marching cubes levels a staircase.
+                _maskedPhi = np.ma.MaskedArray(np.where(coreMapUninhib > 0.5, 1.0, -1.0), _maskFull)
+            else:
+                _maskedPhi = np.ma.MaskedArray(coreMapUninhib, _maskFull)
             _fmmResult = skfmm.distance(_maskedPhi, dx=cellSize)
             # Fill masked positions with max distance so marching-cubes never
             # sees a spurious zero-crossing at the cylinder boundary.
@@ -1082,13 +1265,34 @@ class Fmm3DGrain(Grain):
         _nCoarse = max(2, min(20, numLevels))
         _coarseLevels = np.linspace(0.0, maxDist, _nCoarse, endpoint=False).tolist()
 
+        # Masked voxels hold a large fill value that would read as a surface where the bore meets the casting wall,
+        # so marching cubes runs on a copy where they take the value of the nearest voxel inside the tube.
+        _mcField = regressionMapUninhib
+        if mask.ndim == 3 and mask.strides[0] == 0:
+            _, (_nearestRow, _nearestCol) = ndimage.distance_transform_edt(mask[0], return_indices=True)
+            _mcField = regressionMapUninhib[:, _nearestRow, _nearestCol]
+
+        # Each level's total area is the sum of its per-layer areas, so the same pass records how the burning
+        # surface is distributed along the grain for the mass flux calculation.
+        _layerRows = {}
+
+        def _areaPixelsAt(level):
+            if not _hasLayerAreas:
+                return _marchingAreaPixels(_mcField, valid, level)
+            layers = _marchingLayerAreas(_mcField, valid, level)
+            total = float(layers.sum())
+            if total <= 0:
+                return None
+            _layerRows[level] = layers
+            return total
+
         # --- Coarse pass (sequential — only ~20 calls, minimal overhead) ---
         _coarsePairs: list = []  # [(level, area_m2), ...]
         _firstFailedCoarse: float | None = None
         for _lvl in _coarseLevels:
             if cancelCheck and cancelCheck():
                 raise _GrainSetupCanceled()
-            _ap = _marchingAreaPixels(regressionMapUninhib, valid, _lvl)
+            _ap = _areaPixelsAt(_lvl)
             if _ap is None:
                 _firstFailedCoarse = _lvl
                 break
@@ -1131,9 +1335,7 @@ class Fmm3DGrain(Grain):
                         _workers = os.cpu_count() or 1
                     with ThreadPoolExecutor(max_workers=_workers) as _exec:
                         _rawAreas = list(_exec.map(
-                            lambda lv: _marchingAreaPixels(
-                                regressionMapUninhib, valid, lv
-                            ),
+                            _areaPixelsAt,
                             _fineLevelsSorted,
                         ))
                     if cancelCheck and cancelCheck():
@@ -1143,7 +1345,7 @@ class Fmm3DGrain(Grain):
                     for lv in _fineLevelsSorted:
                         if cancelCheck and cancelCheck():
                             raise _GrainSetupCanceled()
-                        _rawAreas.append(_marchingAreaPixels(regressionMapUninhib, valid, lv))
+                        _rawAreas.append(_areaPixelsAt(lv))
                 _finePairs = [
                     (lv, self.mapToArea(av))
                     for lv, av in zip(_fineLevelsSorted, _rawAreas)
@@ -1169,42 +1371,66 @@ class Fmm3DGrain(Grain):
             burningArea.append(0.0)
 
         self._maxPolledDist = maxDist  # used by getSurfaceAreaAtRegression / getVolumeAtRegression
+        self._layerLevels = self._layerAreas = None
+        if _layerRows:
+            levels = sorted(_layerRows)
+            rows = [_layerRows[level] for level in levels]
+            for burnout in (_firstFailedCoarse, maxDist):  # No surface is left from these levels on
+                if burnout is not None and burnout > levels[-1]:
+                    levels.append(burnout)
+                    rows.append(np.zeros_like(rows[0]))
+            self._layerLevels = np.array(levels)
+            self._layerAreas = np.array(rows)
+        self._layerOffset = 1 if self.props['inhibitedEnds'].getValue() in ('Top', 'Neither') else 0
         if len(polled) < 2:
             self.faceArea = np.zeros(2)
             self.faceAreaFunc = interpolate.interp1d([0.0, 1.0], [0.0, 0.0])
             self.volumeFunc = None
         else:
-            # Compute volume curve and SA on a uniform grid so that
-            # _smoothSeries (SG filter) and np.gradient both see even spacing.
-            # The MC-derived adaptive 'polled' has non-uniform spacing that
-            # produces derivative artifacts at refinement boundaries.
-            _rmSorted = np.sort(regressionMapUninhib[valid].ravel())
-            _nVox = len(_rmSorted)
-            _nPts = max(len(polled), 50)
-            _uniformPolled = np.linspace(0.0, maxDist, _nPts)
-            _idxs = np.searchsorted(_rmSorted, _uniformPolled, side='right')
-            _volCounts = self.mapToVolume(_nVox - _idxs.astype(float))
-            _smoothVol = _smoothSeries(_volCounts)
-            self.volumeFunc = interpolate.interp1d(
-                _uniformPolled, _smoothVol,
-                fill_value=(_smoothVol[0], 0.0),
-                bounds_error=False,
-            )
+            fromAreas = None
+            if self.CURVES_FROM_AREA:
+                propellantVoxels = int(np.count_nonzero((regressionMapUninhib > 0) & valid))
+                fromAreas = self._getCurvesFromAreas(polled, burningArea, self.mapToVolume(propellantVoxels), maxDist)
+            if fromAreas is not None:
+                _uniformPolled, _smoothVol, self.faceArea, self._areaShortfall = fromAreas
+                self.volumeFunc = interpolate.interp1d(
+                    _uniformPolled, _smoothVol, fill_value=(_smoothVol[0], 0.0), bounds_error=False
+                )
+                self.faceAreaFunc = interpolate.interp1d(
+                    _uniformPolled, self.faceArea, fill_value=(float(self.faceArea[0]), 0.0), bounds_error=False
+                )
+            else:
+                # Compute volume curve and SA on a uniform grid so that
+                # _smoothSeries (SG filter) and np.gradient both see even spacing.
+                # The MC-derived adaptive 'polled' has non-uniform spacing that
+                # produces derivative artifacts at refinement boundaries.
+                _rmSorted = np.sort(regressionMapUninhib[valid].ravel())
+                _nVox = len(_rmSorted)
+                _nPts = max(len(polled), self.AREA_CURVE_POINTS)
+                _uniformPolled = np.linspace(0.0, maxDist, _nPts)
+                _idxs = np.searchsorted(_rmSorted, _uniformPolled, side='right')
+                _volCounts = self.mapToVolume(_nVox - _idxs.astype(float))
+                _smoothVol = _smoothSeries(_volCounts)
+                self.volumeFunc = interpolate.interp1d(
+                    _uniformPolled, _smoothVol,
+                    fill_value=(_smoothVol[0], 0.0),
+                    bounds_error=False,
+                )
 
-            # Derive surface area from the volume curve via the co-area
-            # formula: SA(r) = -dV/dr.  This is exact for uniform regression
-            # and automatically consistent with the volume (mass) tracking,
-            # eliminating the phantom-thrust divergence that marching-cubes
-            # iso-surface area exhibits on complex geometries.
-            _diameter = self.props['diameter'].getValue()
-            _dr = _uniformPolled[1] - _uniformPolled[0]
-            _dVdMap = np.gradient(_smoothVol, _dr)
-            self.faceArea = np.maximum(-_dVdMap * (2.0 / _diameter), 0.0)
-            self.faceAreaFunc = interpolate.interp1d(
-                _uniformPolled, self.faceArea,
-                fill_value=(float(self.faceArea[0]), 0.0),
-                bounds_error=False,
-            )
+                # Derive surface area from the volume curve via the co-area
+                # formula: SA(r) = -dV/dr.  This is exact for uniform regression
+                # and automatically consistent with the volume (mass) tracking,
+                # eliminating the phantom-thrust divergence that marching-cubes
+                # iso-surface area exhibits on complex geometries.
+                _diameter = self.props['diameter'].getValue()
+                _dr = _uniformPolled[1] - _uniformPolled[0]
+                _dVdMap = np.gradient(_smoothVol, _dr)
+                self.faceArea = np.maximum(-_dVdMap * (2.0 / _diameter), 0.0)
+                self.faceAreaFunc = interpolate.interp1d(
+                    _uniformPolled, self.faceArea,
+                    fill_value=(float(self.faceArea[0]), 0.0),
+                    bounds_error=False,
+                )
 
         # Remove uninhibited disks, if necessary
         if self.props['inhibitedEnds'].getValue() in ['Top', 'Neither']:# BOTTOM
@@ -1248,14 +1474,10 @@ class Fmm3DGrain(Grain):
                 if cancelCheck and cancelCheck():
                     raise _GrainSetupCanceled()
                 if _aftInhibited:
-                    _best = 0
-                    for _z in range(_scanAft):
-                        _c = get_core_area_count_at_slice(
-                            self._regressionMapF64, self._maskU8, _lvl, _z
-                        )
-                        if _c > _best:
-                            _best = _c
-                    _portCounts.append(self.mapToArea(_best))
+                    _portCounts.append(self.mapToArea(self._getAftPortCount([
+                        get_core_area_count_at_slice(self._regressionMapF64, self._maskU8, _lvl, _z)
+                        for _z in range(_scanAft)
+                    ])))
                 if _foreInhibited:
                     _best = 0
                     for _z in range(_zdim - _scanFore, _zdim):
@@ -1288,7 +1510,7 @@ class Fmm3DGrain(Grain):
 
         self._regressionMapCacheKey = self._makeCoreMapCacheKey(
             self.coreMap, self.props['inhibitedEnds'].getValue(), self.mapDim
-        )
+        ) + (self._getMaskSignature(),)
 
     def getSurfaceAreaAtRegression(self, regDist):
         mapDist = self.normalize(regDist)
@@ -1384,10 +1606,13 @@ class Fmm3DGrain(Grain):
             coreArea = self.mapToArea(coreAreaVoxels)
             if coreArea <= 0:
                 return 0
-            v_total = get_volume_count_gt_threshold(regressionMap, maskU8, mapDist)
-            v_after = get_volume_count_gt_threshold_from_z(regressionMap, maskU8, mapDist, zPos + 1) \
-                      if zPos + 1 < zdim else 0
-            zFraction = (v_total - v_after) / v_total if v_total > 0 else 0.0
+            fractions = self._getAreaFractionFore(mapDist)
+            if fractions is not None:
+                zFraction = float(fractions[zPos])
+            else:
+                v_total = get_volume_count_gt_threshold(regressionMap, maskU8, mapDist)
+                v_ahead = get_volume_count_gt_threshold_from_z(regressionMap, maskU8, mapDist, zPos)
+                zFraction = v_ahead / v_total if v_total > 0 else 0.0
             burningVolume = self.getSurfaceAreaAtRegression(regDist) * dRegDist * zFraction
             return (massIn + density * burningVolume / dTime) / coreArea
 
@@ -1416,6 +1641,10 @@ class Fmm3DGrain(Grain):
 
             if endPos < startPos:
                 return 0.0
+
+            byArea = self._getPeakFluxByArea(massIn, dTime, regDist, dRegDist, density, startPos, endPos)
+            if byArea is not None:
+                return byArea
 
             candidates = self._getMeshedPeakSearchCandidates(
                 startPos, endPos, massIn, dTime, regDist, dRegDist, density
@@ -1463,10 +1692,8 @@ class Fmm3DGrain(Grain):
                         coreArea = self.mapToArea(coreAreaVoxels)
                     if coreArea <= 0:
                         continue
-                    # zFraction = V_prop(0..z) / V_total
-                    sfxReg  = int(propSfxReg[z + 1]) if z + 1 < zdim else 0
-                    partial  = totalReg - sfxReg
-                    zFraction = partial / totalReg if totalReg > 0 else 0.0
+                    # zFraction = V_prop(z..end) / V_total, the propellant at or ahead of z that feeds its flow
+                    zFraction = int(propSfxReg[z]) / totalReg if totalReg > 0 else 0.0
                     massFlow = massIn + zFraction * smoothBurnVol * density / dTime
                     massFlux = massFlow / coreArea
                     if massFlux > peakFlux:
@@ -1534,12 +1761,8 @@ class Fmm3DGrain(Grain):
             # bore area.  Solid end-cap faces (inhibitedEnds != Neither/Top)
             # appear as near-zero core and are automatically out-competed.
             scanTo = max(2, zdim // 20)
-            best = get_core_area_count_at_slice(regressionMap, maskU8, mapDist, 0)
-            for z in range(1, scanTo):
-                c = get_core_area_count_at_slice(regressionMap, maskU8, mapDist, z)
-                if c > best:
-                    best = c
-            return self.mapToArea(best)
+            counts = [get_core_area_count_at_slice(regressionMap, maskU8, mapDist, z) for z in range(scanTo)]
+            return self.mapToArea(self._getAftPortCount(counts))
 
         mapAtReg = np.ma.MaskedArray(self.regressionMap, self.mask) > mapDist
 
@@ -1553,9 +1776,7 @@ class Fmm3DGrain(Grain):
         zdim = mapAtReg.shape[0]
         scanTo = max(2, zdim // 20)
         aftSliceCores = lengthwiseCores[:scanTo][lengthwiseProp[:scanTo] > 0]
-        if len(aftSliceCores) == 0:
-            return self.mapToArea(0)
-        return self.mapToArea(int(aftSliceCores.max()))
+        return self.mapToArea(self._getAftPortCount(aftSliceCores))
 
     def getInitialLength(self):
         if self.totalLength is None:
@@ -1580,3 +1801,93 @@ class Fmm3DGrain(Grain):
         if self.props['length'].getValue() > 0 and self.props['inhibitedEnds'].getValue() in ['Neither', 'Bottom']:
             errors.append(SimAlert(SimAlertLevel.ERROR, SimAlertType.GEOMETRY, 'Cannot have endburner when grain top uninhibited'))
         return errors
+
+
+class ConvertedGrain(Fmm3DGrain):
+    """A 3D FMM version of an existing grain. The source grain is copied and supplies the 3D core map through
+    'getExtrudedCoreMap' and 'getExtrudedMask', so the original is never modified. Created with 'Grain.convertTo3D'.
+
+    Callers should check 'getSizeIssue' before setup and 'getGeometryIssue' after it, and keep using the source grain
+    when either reports a problem."""
+
+    MAX_VOXELS = 250_000_000
+
+    def __init__(self, source: Grain, inhibitedEnds: str) -> None:
+        super().__init__()
+        self.source = copy.deepcopy(source)
+        self.geomName = source.geomName
+        self.props["diameter"].setValue(source.props["diameter"].getValue())
+        self.props["length"].setValue(source.props["length"].getValue())
+        self.props["inhibitedEnds"].setValue(inhibitedEnds)
+        self.props["massFlux3D"].setValue(True)
+        self._setupMapDim = None
+
+    def simulationSetup(self, config, cancelCheck=None, statusCb=None):
+        mapDim = config.getProperty("3DmapDim")
+        if self._setupMapDim != mapDim:  # Conversion checks set the grain up early, so skip a repeat
+            super().simulationSetup(config, cancelCheck, statusCb)
+            self._setupMapDim = mapDim
+
+    def generateCoreMap(self) -> None:
+        length = self.source.props["length"].getValue()
+        self.totalLength = FloatProperty("Length", "m", 0, 10)
+        self.totalLength.setValue(length)
+        self.mapLength = max(1, int(np.ceil(self.lengthToMap(length))))
+        shape = (self.mapLength, self.mapDim, self.mapDim)
+        self.mask = np.broadcast_to(self.source.getExtrudedMask(self.mapDim)[None, :, :], shape)
+        self.mapX = self.mapY = self.mapZ = None
+        self.coreMap = self.source.getExtrudedCoreMap(self.mapLength, self.mapDim)
+
+    def getSizeIssue(self, mapDim: int) -> Union[str, None]:
+        """Returns a description of why this grain is too large to convert at the given map dimension, or None."""
+        diameter = self.props["diameter"].getValue()
+        if diameter <= 0:
+            return "the grain has no diameter"
+        voxels = mapDim * np.ceil(mapDim * self.props["length"].getValue() / diameter) * mapDim
+        if voxels > self.MAX_VOXELS:
+            return "it would need {:.0f} million voxels at 3D map dimension {}".format(voxels / 1e6, mapDim)
+        return None
+
+    def getGeometryIssue(self, config) -> Union[str, None]:
+        """Compares the converted geometry with the source grain after setup. Returns a description of the first
+        disagreement that is larger than the voxel resolution explains, or None when they agree."""
+        mapDim = config.getProperty("3DmapDim")
+        volumeTolerance = max(0.08, 6 / mapDim)
+        areaTolerance = max(0.15, 12 / mapDim)
+        self.source.simulationSetup(config)
+        sourceWeb = self.source.getWebLeft(0)
+        if sourceWeb <= 0 or self.getWebLeft(0) <= 0:
+            return "its web thickness is not positive"
+        sourceVolume = self.source.getVolumeAtRegression(0)
+        if sourceVolume <= 0:
+            return "its volume is not positive"
+        fractions = (0.1, 0.3, 0.5, 0.7)  # The first sample avoids the smoothing artifact at zero regression
+        areaFractions = fractions[:3]  # Area comes from the slope of a smoothed volume curve, which is too noisy near burnout
+        regs = [fraction * sourceWeb for fraction in fractions]
+        sourceAreas = [self.source.getSurfaceAreaAtRegression(reg) for reg in regs[:len(areaFractions)]]
+        peakArea = max(sourceAreas)
+        if peakArea <= 0:
+            return "its burning area is not positive"
+        # Differences are measured against the initial volume and the peak area, so the small amounts left near
+        # burnout cannot make a harmless difference look large.
+        deviations = [("web", abs(self.getWebLeft(0) / sourceWeb - 1), volumeTolerance + 0.07),
+                      ("volume", abs(self.getVolumeAtRegression(0) / sourceVolume - 1), volumeTolerance)]
+        for index, (fraction, reg) in enumerate(zip(fractions, regs)):
+            where = "at {:.0f}% of the web".format(100 * fraction)
+            if index < len(areaFractions):
+                deviations.append(("burning area " + where,
+                                   abs(self.getSurfaceAreaAtRegression(reg) - sourceAreas[index]) / peakArea, areaTolerance))
+            deviations.append(("volume " + where, abs(self.getVolumeAtRegression(reg) - self.source.getVolumeAtRegression(reg))
+                               / sourceVolume, volumeTolerance + 0.02))
+        for name, deviation, tolerance in deviations:
+            if not (deviation <= tolerance):  # Also catches NaN
+                return "the 3D {} is {:.0f}% away from the original (limit {:.0f}%)".format(
+                    name, 100 * deviation, 100 * tolerance
+                )
+        return None
+
+    def getDetailsString(self, lengthUnit: str = "m") -> str:
+        return self.source.getDetailsString(lengthUnit)
+
+    def getGeometryErrors(self) -> List[SimAlert]:
+        return self.source.getGeometryErrors()
