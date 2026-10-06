@@ -203,6 +203,7 @@ def worker(args):
                 motor = buildMotor([converted], config, propellant, throat)
                 rows.append({'propellant': propellant, 'mode': mode, 'mapDim': args.map_dim,
                              'gridSetupSeconds': setupSeconds, 'peakRssMb': rss, 'gateIssue': issue,
+                             'areaShortfall': getattr(converted, '_areaShortfall', None),
                              'voxels': int(np.prod(converted.coreMap.shape)), **runOnce(motor, converted)})
     with open(args.result, 'a') as out:
         for row in rows:

@@ -85,6 +85,7 @@ td small { color: var(--ink2); margin-left: 4px; }
   <section aria-labelledby="h-compare">
     <h2 id="h-compare">Compare runs</h2>
     <div class="bar">
+      <label class="field" id="versionField" hidden>Area curve<select id="version"></select></label>
       <label class="field">Grain<select id="grain"></select></label>
       <label class="field">Propellant<select id="prop"></select></label>
       <label class="field" id="fluxDimField" hidden>Map dimension<select id="fluxDim"></select></label>
@@ -122,12 +123,18 @@ td small { color: var(--ink2); margin-left: 4px; }
 <script type="application/json" id="data">/*DATA*/null</script>
 <script>
 (function () {
-  var D = JSON.parse(document.getElementById('data').textContent);
-  var COL = {}; D.meta.columns.forEach(function (c, i) { COL[c] = i; });
-  var S = new Map(D.summary.map(function (r) { return [r[0] + '|' + r[1] + '|' + r[2] + '|' + r[3], r]; }));
-  var props = D.meta.propellants.map(function (p) { return p.id; });
-  var grainById = {}; D.meta.grains.forEach(function (g) { grainById[g.id] = g; });
-  var MODES = D.meta.modes;
+  var ALL = JSON.parse(document.getElementById('data').textContent);
+  var META = ALL.meta, D, S, grainById = {};
+  var COL = {}; META.columns.forEach(function (c, i) { COL[c] = i; });
+  var props = META.propellants.map(function (p) { return p.id; });
+  var VERSION_LABEL = { before: 'before: slope of the smoothed volume', after: 'after: marching cubes area', sweep: 'sweep' };
+  function useVersion(v) {
+    state.version = v; D = ALL.versions[v];
+    S = new Map(D.summary.map(function (r) { return [r[0] + '|' + r[1] + '|' + r[2] + '|' + r[3], r]; }));
+    grainById = {}; D.grains.forEach(function (g) { grainById[g.id] = g; });
+  }
+  var MODES = META.modes;
+  var PSI_NOTE = 'above ' + Math.round(META.thresholdPsi) + ' psi';
   var MODE_LABEL = { '3d-2dflux': '2D flux (massFlux3D off)', '3d-area': 'per-layer area flux', '3d-legacy-Exact': 'legacy volume fraction' };
   var MODE_VAR = { '3d-area': '--c1', '3d-2dflux': '--c2', '3d-legacy-Exact': '--c3' };
   var PROP_VAR = ['--c1', '--c2', '--c3', '--c4'];
@@ -147,7 +154,7 @@ td small { color: var(--ink2); margin-left: 4px; }
     flux: 'Peak core mass flux through the grain over time, for one map dimension. The baseline for the FMM grains is the 2D approximation; for BATES and conical grains it is exact.',
     mach: 'Core Mach number computed from the mass flux, so it inherits the same method differences.'
   };
-  var state = { grain: 'bates-both', prop: props[0], view: 'pressure', dims: new Set(), base: true, fluxDim: 128, modes: new Set(['3d-area', '3d-2dflux']), heat: 'impulse', heatMode: '3d-area', hideTail: true };
+  var state = { version: META.versions[META.versions.length - 1], grain: 'bates-both', prop: props[0], view: 'pressure', dims: new Set(), base: true, fluxDim: 128, modes: new Set(['3d-area', '3d-2dflux']), heat: 'impulse', heatMode: '3d-area', hideTail: true };
   var charts = {};
 
   function css(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
@@ -165,16 +172,19 @@ td small { color: var(--ink2); margin-left: 4px; }
 
   // ---------- facts ----------
   function renderFacts() {
-    var f = document.getElementById('facts');
+    var f = document.getElementById('facts'); f.textContent = '';
     var errs = [];
-    D.meta.grains.forEach(function (g) { if (g.dims.indexOf(128) >= 0) errs.push(medianError(g.id, 128, 'impulse', '3d-area')); });
-    var items = [[D.meta.runs.toLocaleString(), 'simulations'], [D.meta.grains.length + ' × ' + D.meta.propellants.length, 'grains × propellants'],
-      [fmt(median(errs), 1) + '%', 'median impulse error at map 128'], ['96 to 128', 'map dimension knee']];
+    D.grains.forEach(function (g) { if (g.dims.indexOf(128) >= 0) errs.push(medianError(g.id, 128, 'eImpulse', '3d-area')); });
+    var items = [[D.runs.toLocaleString(), 'simulations'], [D.grains.length + ' × ' + META.propellants.length, 'grains × propellants'],
+      [fmt(median(errs), 1) + '%', 'median impulse error at map 128, ' + PSI_NOTE], ['96 to 128', 'map dimension knee']];
     items.forEach(function (it) { var d = el('div'); d.appendChild(el('b', null, it[0])); d.appendChild(el('span', null, it[1])); f.appendChild(d); });
   }
-  function medianError(g, d, c, mode) {
-    return median(props.map(function (p) { var v = val(g, p, mode, d, c), b = val(g, p, 'baseline', 750, c); return Math.abs(v / b - 1) * 100; }));
+  function errOf(g, p, mode, d, c) {
+    var v = val(g, p, mode, d, c);
+    if (c === 'eCurve') return v;
+    var b = val(g, p, 'baseline', 750, c); return Math.abs(v / b - 1) * 100;
   }
+  function medianError(g, d, c, mode) { return median(props.map(function (p) { return errOf(g, p, mode, d, c); })); }
 
   // ---------- main chart ----------
   var crosshair = { id: 'crosshair', afterDatasetsDraw: function (chart) {
@@ -182,6 +192,12 @@ td small { color: var(--ink2); margin-left: 4px; }
     if (!a || !a.length) return;
     var x = a[0].element.x, ctx = chart.ctx, area = chart.chartArea;
     ctx.save(); ctx.strokeStyle = css('--ink2'); ctx.lineWidth = 1; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x, area.top); ctx.lineTo(x, area.bottom); ctx.stroke(); ctx.restore();
+  } };
+  var tailBand = { id: 'tailBand', beforeDatasetsDraw: function (chart) {
+    var view = chart.options.plugins.tailBand; if (!view || !view.t) return;
+    var x = chart.scales.x.getPixelForValue(view.t), area = chart.chartArea; if (x >= area.right) return;
+    var ctx = chart.ctx; ctx.save(); ctx.fillStyle = css('--rule'); ctx.globalAlpha = 0.55; ctx.fillRect(x, area.top, area.right - x, area.bottom - area.top);
+    ctx.globalAlpha = 1; ctx.fillStyle = css('--ink2'); ctx.font = '11px ' + css('--sans'); ctx.textAlign = 'right'; ctx.fillText('below ' + Math.round(META.thresholdPsi) + ' psi: not judged', area.right - 6, area.top + 14); ctx.restore();
   } };
   function baseOptions(xTitle, yTitle, extra) {
     var ink2 = css('--ink2'), rule = css('--rule');
@@ -232,8 +248,9 @@ td small { color: var(--ink2); margin-left: 4px; }
         label: function (c) { var v = c.parsed.y; return ' ' + c.dataset.label + ': ' + (v == null ? '–' : v.toFixed(view.digits + (view.err ? 1 : 0)) + (view.err ? ' %' : '')); }
       };
       if (view.err) { o.scales.y.suggestedMin = -6; o.scales.y.suggestedMax = 6; }
+      o.plugins.tailBand = { t: val(state.grain, state.prop, 'baseline', 750, 'eBurn') };
     });
-    charts.main = new Chart(document.getElementById('main'), { type: 'line', data: { datasets: built.sets }, options: opts, plugins: [crosshair] });
+    charts.main = new Chart(document.getElementById('main'), { type: 'line', data: { datasets: built.sets }, options: opts, plugins: [crosshair, tailBand] });
     document.getElementById('viewNote').textContent = NOTES[state.view];
   }
 
@@ -265,9 +282,12 @@ td small { color: var(--ink2); margin-left: 4px; }
   }
   function renderSelects() {
     var g = document.getElementById('grain'); g.textContent = '';
-    D.meta.grains.forEach(function (x) { var o = el('option', { value: x.id }, x.id + ' (' + x.type + ', L ' + x.length + ' m)'); if (x.id === state.grain) o.selected = true; g.appendChild(o); });
+    D.grains.forEach(function (x) { var o = el('option', { value: x.id }, x.id + ' (' + x.type + ', L ' + x.length + ' m)'); if (x.id === state.grain) o.selected = true; g.appendChild(o); });
     var p = document.getElementById('prop'); p.textContent = '';
-    D.meta.propellants.forEach(function (x) { var o = el('option', { value: x.id }, x.id + ' (n ' + x.n + ')'); if (x.id === state.prop) o.selected = true; p.appendChild(o); });
+    META.propellants.forEach(function (x) { var o = el('option', { value: x.id }, x.id + ' (n ' + x.n + ')'); if (x.id === state.prop) o.selected = true; p.appendChild(o); });
+    var v = document.getElementById('version'); v.textContent = '';
+    META.versions.forEach(function (k) { var o = el('option', { value: k }, VERSION_LABEL[k] || k); if (k === state.version) o.selected = true; v.appendChild(o); });
+    document.getElementById('versionField').hidden = META.versions.length < 2;
     var f = document.getElementById('fluxDim'); f.textContent = '';
     grainDims(state.grain).forEach(function (d) { var o = el('option', { value: d }, String(d)); if (d === state.fluxDim) o.selected = true; f.appendChild(o); });
   }
@@ -276,8 +296,8 @@ td small { color: var(--ink2); margin-left: 4px; }
   function renderTable() {
     var t = document.getElementById('table'); t.textContent = '';
     var view = VIEWS.filter(function (v) { return v.id === state.view; })[0];
-    var heads = ['Run', 'Grid setup s', 'Simulation s', 'Memory MB', 'Burn s', 'Peak P MPa', 'Avg P MPa', 'Impulse N·s', 'Peak Kn', 'Peak flux', 'Max Mach'];
-    var cols = ['setup', 'loop', 'rss', 'burn', 'peakP', 'avgP', 'impulse', 'peakKn', 'peakFlux', 'maxMach'], digits = [1, 2, 0, 2, 2, 2, 0, 0, 0, 3];
+    var heads = ['Run', 'Grid setup s', 'Simulation s', 'Memory MB', 'Burn s', 'Peak P MPa', 'Avg P MPa', 'Impulse N·s', 'Peak Kn', 'Peak flux', 'Max Mach', 'Curve RMS %'];
+    var cols = ['setup', 'loop', 'rss', 'eBurn', 'peakP', 'eAvgP', 'eImpulse', 'peakKn', 'peakFlux', 'maxMach', 'eCurve'], digits = [1, 2, 0, 2, 2, 2, 0, 0, 0, 3, 2];
     var hr = el('tr'); heads.forEach(function (h) { hr.appendChild(el('th', null, h)); }); t.appendChild(el('thead')).appendChild(hr);
     var body = el('tbody'); t.appendChild(body);
     var g = state.grain, p = state.prop;
@@ -291,7 +311,7 @@ td small { color: var(--ink2); margin-left: 4px; }
         var td = el('td'), v = val(g, p, row[1], row[2], c);
         if (c === 'setup' && row[1] === 'baseline') { td.textContent = fmt(v, 2); }
         else td.textContent = fmt(v, digits[i]);
-        if (row[1] !== 'baseline' && ['burn', 'peakP', 'avgP', 'impulse', 'peakKn', 'peakFlux', 'maxMach'].indexOf(c) >= 0) {
+        if (row[1] !== 'baseline' && ['eBurn', 'peakP', 'eAvgP', 'eImpulse', 'peakKn', 'peakFlux', 'maxMach'].indexOf(c) >= 0) {
           var b = val(g, p, 'baseline', 750, c), d = (v / b - 1) * 100;
           if (isFinite(d)) td.appendChild(el('small', null, (d >= 0 ? '+' : '') + d.toFixed(1) + '%'));
         }
@@ -302,10 +322,10 @@ td small { color: var(--ink2); margin-left: 4px; }
   }
 
   // ---------- resolution study ----------
-  var MINI = [['impulse', 'Total impulse error [%]'], ['avgP', 'Average pressure error [%]'], ['peakP', 'Peak pressure error [%]'], ['peakKn', 'Peak Kn error [%]']];
+  var MINI = [['eImpulse', 'Impulse error, ' + PSI_NOTE + ' [%]'], ['eAvgP', 'Average pressure error, ' + PSI_NOTE + ' [%]'], ['eCurve', 'Pressure curve RMS, ' + PSI_NOTE + ' [% of peak]'], ['peakP', 'Peak pressure error [%]'], ['peakKn', 'Peak Kn error [%]']];
   function renderMini() {
     var root = document.getElementById('mini'); root.textContent = '';
-    ['mini0', 'mini1', 'mini2', 'mini3', 'mini4', 'mini5'].forEach(function (k) { if (charts[k]) charts[k].destroy(); });
+    ['mini0', 'mini1', 'mini2', 'mini3', 'mini4', 'mini5', 'mini6'].forEach(function (k) { if (charts[k]) charts[k].destroy(); });
     var dims = grainDims(state.grain), labels = dims.map(String);
     function card(title, key, datasets, log, yTitle) {
       var c = el('div', { class: 'card' }); c.appendChild(el('h3', null, title)); var plot = el('div', { class: 'plot' }); var cv = el('canvas'); plot.appendChild(cv); c.appendChild(plot); root.appendChild(c);
@@ -318,7 +338,7 @@ td small { color: var(--ink2); margin-left: 4px; }
     }
     MINI.forEach(function (m, i) {
       var sets = props.map(function (p, j) {
-        return { label: p, data: dims.map(function (d) { var v = val(state.grain, p, '3d-area', d, m[0]), b = val(state.grain, p, 'baseline', 750, m[0]); return Math.max(Math.abs(v / b - 1) * 100, 0.01); }), borderColor: css(PROP_VAR[j]), backgroundColor: css(PROP_VAR[j]), borderWidth: 1.6, pointRadius: 3, tension: 0 };
+        return { label: p, data: dims.map(function (d) { return Math.max(errOf(state.grain, p, '3d-area', d, m[0]), 0.01); }), borderColor: css(PROP_VAR[j]), backgroundColor: css(PROP_VAR[j]), borderWidth: 1.6, pointRadius: 3, tension: 0 };
       });
       sets.push({ label: '1%', data: dims.map(function () { return 1; }), borderColor: css('--ink2'), borderDash: [4, 4], borderWidth: 1, pointRadius: 0 });
       card(m[1], 'mini' + i, sets, true, 'error [%]');
@@ -327,24 +347,25 @@ td small { color: var(--ink2); margin-left: 4px; }
     var loop = { label: 'one simulation', data: dims.map(function (d) { return median(props.map(function (p) { return val(state.grain, p, '3d-area', d, 'loop'); })); }), borderColor: css('--c2'), backgroundColor: css('--c2'), borderWidth: 1.6, pointRadius: 3 };
     var baseTotal = median(props.map(function (p) { return val(state.grain, p, 'baseline', 750, 'setup') + val(state.grain, p, 'baseline', 750, 'loop'); }));
     var baseLine = { label: 'normal simulation', data: dims.map(function () { return baseTotal; }), borderColor: css('--base'), borderDash: [6, 4], borderWidth: 1.4, pointRadius: 0 };
-    card('Time per run [s]', 'mini4', [setup, loop, baseLine], true, 'seconds');
-    charts.mini4.options.scales.y.min = 0.01;
+    card('Time per run [s]', 'mini5', [setup, loop, baseLine], true, 'seconds');
+    charts.mini5.options.scales.y.min = 0.01;
     var mem = { label: 'peak memory', data: dims.map(function (d) { return median(props.map(function (p) { return val(state.grain, p, '3d-area', d, 'rss'); })); }), borderColor: css('--c3'), backgroundColor: css('--c3'), borderWidth: 1.6, pointRadius: 3 };
-    card('Peak memory [MB]', 'mini5', [mem], false, 'MB');
-    charts.mini4.update();
+    card('Peak memory [MB]', 'mini6', [mem], false, 'MB');
+    charts.mini5.update();
   }
   function renderResChips() {
     var c = document.getElementById('resChips'); c.textContent = '';
-    props.forEach(function (p, j) { var b = el('span', { class: 'chip', 'aria-pressed': 'true' }); var sw = el('i'); sw.style.setProperty('--sw', css(PROP_VAR[j])); b.appendChild(sw); b.appendChild(document.createTextNode(p + ' (n ' + D.meta.propellants[j].n + ')')); b.style.cursor = 'default'; c.appendChild(b); });
+    props.forEach(function (p, j) { var b = el('span', { class: 'chip', 'aria-pressed': 'true' }); var sw = el('i'); sw.style.setProperty('--sw', css(PROP_VAR[j])); b.appendChild(sw); b.appendChild(document.createTextNode(p + ' (n ' + META.propellants[j].n + ')')); b.style.cursor = 'default'; c.appendChild(b); });
   }
 
   // ---------- heatmap ----------
   var HEAT = {
-    impulse: { label: 'Total impulse error [%]', f: function (g, d) { return medianError(g, d, 'impulse', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
-    avgP: { label: 'Average pressure error [%]', f: function (g, d) { return medianError(g, d, 'avgP', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
+    impulse: { label: 'Impulse error, ' + PSI_NOTE + ' [%]', f: function (g, d) { return medianError(g, d, 'eImpulse', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
+    avgP: { label: 'Average pressure error, ' + PSI_NOTE + ' [%]', f: function (g, d) { return medianError(g, d, 'eAvgP', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
+    curve: { label: 'Pressure curve RMS, ' + PSI_NOTE + ' [% of peak]', f: function (g, d) { return medianError(g, d, 'eCurve', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
     peakP: { label: 'Peak pressure error [%]', f: function (g, d) { return medianError(g, d, 'peakP', '3d-area'); }, lo: 0.3, hi: 15, d: 1, fam: 'b' },
     peakKn: { label: 'Peak Kn error [%]', f: function (g, d) { return medianError(g, d, 'peakKn', '3d-area'); }, lo: 0.3, hi: 12, d: 1, fam: 'b' },
-    burn: { label: 'Burn time error [%]', f: function (g, d) { return medianError(g, d, 'burn', '3d-area'); }, lo: 0.3, hi: 6, d: 1, fam: 'b' },
+    burn: { label: 'Burn time error, ' + PSI_NOTE + ' [%]', f: function (g, d) { return medianError(g, d, 'eBurn', '3d-area'); }, lo: 0.3, hi: 6, d: 1, fam: 'b' },
     peakFlux: { label: 'Peak mass flux error [%]', f: function (g, d) { return medianError(g, d, 'peakFlux', state.heatMode); }, lo: 1, hi: 60, d: 0, fam: 'b', modes: true },
     maxMach: { label: 'Max core Mach error [%]', f: function (g, d) { return medianError(g, d, 'maxMach', state.heatMode); }, lo: 1, hi: 60, d: 0, fam: 'b', modes: true },
     setup: { label: 'Grid setup time [s]', f: function (g, d) { return median(props.map(function (p) { return val(g, p, '3d-area', d, 'setup'); })); }, lo: 0.1, hi: 150, d: 1, fam: 'g' },
@@ -361,7 +382,7 @@ td small { color: var(--ink2); margin-left: 4px; }
     root.appendChild(el('div', { class: 'h' }));
     dims.forEach(function (d) { root.appendChild(el('div', { class: 'h' }, String(d))); });
     var lo = rgb(css(m.fam === 'b' ? '--heatLo' : '--heatLoG')), hi = rgb(css(m.fam === 'b' ? '--heatHi' : '--heatHiG'));
-    D.meta.grains.forEach(function (g) {
+    D.grains.forEach(function (g) {
       root.appendChild(el('div', { class: 'g' }, g.id));
       dims.forEach(function (d) {
         var b = el('button', { type: 'button' });
@@ -407,6 +428,7 @@ td small { color: var(--ink2); margin-left: 4px; }
   }
 
   document.getElementById('grain').addEventListener('change', function (e) { state.grain = e.target.value; selectDefaults(); renderAll(true); });
+  document.getElementById('version').addEventListener('change', function (e) { useVersion(e.target.value); if (!grainById[state.grain]) state.grain = D.grains[0].id; selectDefaults(); renderFacts(); renderAll(true); renderHeat(); });
   document.getElementById('prop').addEventListener('change', function (e) { state.prop = e.target.value; renderAll(false); });
   document.getElementById('fluxDim').addEventListener('change', function (e) { state.fluxDim = +e.target.value; renderAll(false); });
   document.getElementById('heatMetric').addEventListener('change', function (e) { state.heat = e.target.value; renderHeat(); });
@@ -416,6 +438,6 @@ td small { color: var(--ink2); margin-left: 4px; }
   new MutationObserver(themeChanged).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
   Chart.defaults.font.family = css('--sans');
-  selectDefaults(); renderFacts(); renderSelects(); renderHeatSelects(); renderAll(true); renderHeat(); renderFindings();
+  useVersion(state.version); selectDefaults(); renderFacts(); renderSelects(); renderHeatSelects(); renderAll(true); renderHeat(); renderFindings();
 })();
 </script>

@@ -65,6 +65,7 @@ cdef inline double _cube_area(
     int[::1] edz0, int[::1] edy0, int[::1] edx0,
     int[::1] edz1, int[::1] edy1, int[::1] edx1,
     int step,
+    double zScale,
 ) nogil:
     """Return marching-cubes area contribution for the cube at (iz,iy,ix) with
     corner spacing *step* voxels.  step=1 gives the original unit-cube result;
@@ -126,7 +127,7 @@ cdef inline double _cube_area(
             tp   = (level - s0) / (s1 - s0) if s1 != s0 else 0.5
             vx[vi] = ix + dx0 * step + tp * (dx1 - dx0) * step
             vy[vi] = iy + dy0 * step + tp * (dy1 - dy0) * step
-            vz[vi] = iz + dz0 * step + tp * (dz1 - dz0) * step
+            vz[vi] = (iz + dz0 * step + tp * (dz1 - dz0) * step) * zScale
 
         # Triangle area = 0.5 * |cross(v1-v0, v2-v0)|
         ax = vx[1] - vx[0];  ay = vy[1] - vy[0];  az = vz[1] - vz[0]
@@ -201,7 +202,7 @@ def mc_surface_area(
                     tri_t,
                     edz0, edy0, edx0,
                     edz1, edy1, edx1,
-                    step_size,
+                    step_size, 1.0,
                 )
 
     return total
@@ -215,12 +216,13 @@ cdef double _layer_area(
     int[:, ::1] tri_table,
     int[::1] edz0, int[::1] edy0, int[::1] edx0,
     int[::1] edz1, int[::1] edy1, int[::1] edx1,
+    double zScale,
 ) nogil:
     cdef double acc = 0.0
     cdef int iy, ix
     for iy in range(ny - 1):
         for ix in range(nx - 1):
-            acc += _cube_area(grid, vmask, level, iz, iy, ix, tri_table, edz0, edy0, edx0, edz1, edy1, edx1, 1)
+            acc += _cube_area(grid, vmask, level, iz, iy, ix, tri_table, edz0, edy0, edx0, edz1, edy1, edx1, 1, zScale)
     return acc
 
 
@@ -228,8 +230,9 @@ def mc_surface_area_by_layer(
     cnp.float64_t[:, :, ::1] grid      not None,
     cnp.uint8_t[:, :, ::1]   valid_mask not None,
     double level,
+    double z_scale = 1.0,
 ):
-    """Iso-surface area in voxel^2 for each layer of cubes between adjacent z-slices; returns an (nz-1,) array."""
+    """Iso-surface area in voxel^2 (x/y voxel units; z slices are z_scale units apart) for each layer of cubes between adjacent z-slices; returns an (nz-1,) array."""
     cdef int nz = grid.shape[0]
     cdef int ny = grid.shape[1]
     cdef int nx = grid.shape[2]
@@ -248,6 +251,6 @@ def mc_surface_area_by_layer(
     cdef int iz
 
     for iz in prange(nz - 1, nogil=True, schedule='dynamic'):
-        layer[iz] = _layer_area(grid, valid_mask, level, iz, ny, nx, tri_t, edz0, edy0, edx0, edz1, edy1, edx1)
+        layer[iz] = _layer_area(grid, valid_mask, level, iz, ny, nx, tri_t, edz0, edy0, edx0, edz1, edy1, edx1, z_scale)
 
     return out

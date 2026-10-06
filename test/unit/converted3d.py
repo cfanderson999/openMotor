@@ -291,3 +291,52 @@ class TestAftPortArea(unittest.TestCase):
     def test_a_tapering_core_keeps_its_true_aft_area(self):
         self.assertEqual(Fmm3DGrain._getAftPortCount([100, 104, 108, 112]), 100)
         self.assertEqual(Fmm3DGrain._getAftPortCount([]), 0)
+
+
+class TestAreaCurve(unittest.TestCase):
+    """Burning area comes from marching cubes areas on a signed distance field; volume is its integral."""
+
+    @staticmethod
+    def _setUp(grain, mapDim):
+        config = _config()
+        config.setProperty('3DmapDim', mapDim)
+        reference = _grain(*grain[0], **grain[1])
+        converted = reference.convertTo3D()
+        reference.simulationSetup(config)
+        converted.simulationSetup(config)
+        return reference, converted
+
+    def test_the_regression_map_is_zero_at_the_surface_and_negative_in_the_core(self):
+        _, converted = self._setUp((('BATES',), dict(coreDiameter=0.03)), 96)
+        valid = ~converted.mask
+        core = ~converted.coreMap & valid
+        self.assertLess(converted.regressionMap[core].max(), 0)
+        self.assertGreater(converted.regressionMap[converted.coreMap & valid].min(), 0)
+
+    def test_area_at_zero_regression_matches_the_analytic_grain(self):
+        for grain, tolerance in (((('BATES',), dict(coreDiameter=0.03)), 0.05),
+                                 ((('Conical',), dict(forwardCoreDiameter=0.045, aftCoreDiameter=0.02)), 0.07)):
+            reference, converted = self._setUp(grain, 96)
+            for reg in (0, 0.004, 0.008):
+                self.assertAlmostEqual(converted.getSurfaceAreaAtRegression(reg) / reference.getSurfaceAreaAtRegression(reg),
+                                       1, delta=tolerance, msg=str(reg))
+
+    def test_volume_is_the_integral_of_the_area(self):
+        _, converted = self._setUp((('Finocyl',), dict(coreDiameter=0.02, numFins=4, finWidth=0.004, finLength=0.015,
+                                                         invertedFins=False)), 96)
+        for reg in (0.002, 0.006, 0.010):
+            step = 1e-4
+            consumed = converted.getVolumeAtRegression(reg) - converted.getVolumeAtRegression(reg + step)
+            self.assertAlmostEqual(consumed / (converted.getSurfaceAreaAtRegression(reg + step / 2) * step), 1, delta=0.02)
+
+    def test_the_wall_sliver_the_surfaces_miss_stays_small_at_any_map_size(self):
+        for mapDim in (64, 96, 128):
+            shortfall = self._setUp((('BATES',), dict(coreDiameter=0.03)), mapDim)[1]._areaShortfall
+            self.assertGreater(shortfall, 0, mapDim)
+            self.assertLess(shortfall, 0.06, mapDim)
+
+    def test_marching_cubes_areas_that_disagree_with_the_volume_are_not_trusted(self):
+        _, converted = self._setUp((('BATES',), dict(coreDiameter=0.03)), 64)
+        levels = np.linspace(0, 1.0, 20)
+        self.assertIsNone(converted._getCurvesFromAreas(levels, np.full(20, 1e-3), 1e-3, 1.0))
+        self.assertIsNone(converted._getCurvesFromAreas(levels[:3], np.ones(3), 1e-3, 1.0))

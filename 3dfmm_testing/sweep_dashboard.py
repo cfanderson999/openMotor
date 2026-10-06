@@ -16,18 +16,19 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from performance_quality_sweep import GRAINS, PROPELLANTS  # noqa: E402
+from sweep_compare import windowedValues, curveRms, THRESHOLD_PA, PSI  # noqa: E402
 
 GRID_POINTS = 160
 FLUX_MODES = ['3d-2dflux', '3d-area', '3d-legacy-Exact']
 COLUMNS = ['grain', 'prop', 'mode', 'dim', 'burn', 'peakP', 'avgP', 'peakKn', 'impulse', 'peakFlux', 'maxMach',
-           'setup', 'loop', 'flux', 'calls', 'rss', 'voxels', 'steps']
+           'setup', 'loop', 'flux', 'calls', 'rss', 'voxels', 'steps', 'eBurn', 'eImpulse', 'eAvgP', 'eCurve']
 
 
 def clean(values, digits):
     return [None if not np.isfinite(v) else round(float(v), digits) for v in values]
 
 
-def build(out):
+def buildVersion(out):
     rows = [json.loads(line) for line in (Path(out) / 'results.jsonl').read_text().splitlines()]
     rows = [r for r in rows if 'failed' not in r]
     index = {(r['grain'], r['propellant'], r['mode'], r['mapDim']): r for r in rows}
@@ -36,12 +37,15 @@ def build(out):
     summary = []
     for r in rows:
         baseline = r['mode'] == 'baseline'
+        w = windowedValues(r)
+        base = index.get((r['grain'], r['propellant'], 'baseline', 750))
+        curve = 0.0 if baseline or not base else curveRms(r, base)
         summary.append([
             r['grain'], r['propellant'], r['mode'], r['mapDim'], round(r['burnTime'], 3), round(r['peakPressure'] / 1e6, 4),
             round(r['avgPressure'] / 1e6, 4), round(r['peakKn'], 2), round(r['impulse'], 2), round(r['peakFlux'], 2),
             round(r['maxMach'], 4), round(r['setupSeconds'] if baseline else r['gridSetupSeconds'], 3), round(r['loopSeconds'], 3),
             round(r['fluxSeconds'], 4), r['fluxCalls'], 0 if baseline else round(r['peakRssMb'], 1), 0 if baseline else r['voxels'],
-            r['steps']])
+            r['steps'], round(w['burnTime'], 3), round(w['impulse'], 2), round(w['avgPressure'] / 1e6, 4), round(curve, 3)])
 
     grid = {}
     for grain in grains:
@@ -88,11 +92,23 @@ def build(out):
     return {'meta': meta, 'summary': summary, 'grid': grid}
 
 
+def build(outs):
+    versions = {label: buildVersion(path) for label, path in outs.items() if (Path(path) / 'results.jsonl').exists()}
+    first = next(iter(versions.values()))
+    meta = dict(first['meta'], versions=list(versions), thresholdPsi=THRESHOLD_PA / PSI)
+    return {'meta': meta, 'versions': {k: {'summary': v['summary'], 'grid': v['grid'], 'grains': v['meta']['grains'], 'runs': v['meta']['runs']} for k, v in versions.items()}}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--out', default=str(Path(__file__).resolve().parent / 'out' / 'sweep'))
+    parser.add_argument('--out', default=str(Path(__file__).resolve().parent / 'out' / 'sweep'), help='the newest sweep')
+    parser.add_argument('--old', help='an earlier sweep to compare with, shown as the first version')
     args = parser.parse_args()
-    data = build(args.out)
+    outs = {}
+    if args.old:
+        outs['before'] = args.old
+    outs['after' if args.old else 'sweep'] = args.out
+    data = build(outs)
     template = (Path(__file__).resolve().parent / 'sweep_dashboard.html.in').read_text()
     html = template.replace('/*DATA*/null', json.dumps(data, separators=(',', ':')))
     body = Path(args.out) / 'dashboard_body.html'

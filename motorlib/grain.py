@@ -15,7 +15,7 @@ from typing import Tuple, List, Union
 
 import numpy as np
 import skfmm
-from scipy import interpolate
+from scipy import interpolate, ndimage
 from scipy.signal import savgol_filter
 from skimage import measure
 
@@ -628,7 +628,9 @@ class Fmm3DGrain(Grain):
     # the cost on repeat runs (app restart, parameter sweep with fixed geometry).
     # Cache files are stored as .npy under the system temp directory.
     AREA_CURVE_POINTS = 50  # Samples of the volume curve whose slope gives the burning area
-    _FMM_DIST_CACHE_VERSION = '3'   # bump to invalidate all cached entries
+    CURVES_FROM_AREA = True  # Burning area comes from marching cubes areas instead of the slope of the volume curve
+    SIGNED_DISTANCE = True  # Regression map is a signed distance with the surface at zero, not a distance from void voxel centers
+    _FMM_DIST_CACHE_VERSION = '4'   # bump to invalidate all cached entries
     _FMM_DIST_CACHE_DIR: 'pathlib.Path | None' = None
 
     @classmethod
@@ -719,6 +721,7 @@ class Fmm3DGrain(Grain):
         self._layerLevels = None
         self._layerAreas = None
         self._layerOffset = 0  # Index of the first stored slice within the layers, which include any end disks
+        self._areaShortfall = None  # Share of the propellant volume the marching cubes areas miss, mostly the wall sliver
 
     # ---- Bitpacked coreMap storage ------------------------------------------
     # Large STL grains can yield bool coreMap arrays of 100+ MB.  Bool and uint8
@@ -826,6 +829,47 @@ class Fmm3DGrain(Grain):
         if quality == 'Faster':
             return 3
         return 1
+
+    def _getCurvesFromAreas(self, levels, areas, propellantVolume, maxDist):
+        """Burning area and propellant volume against regression from the marching cubes areas at each level.
+
+        The areas are resampled at half voxel spacing and lightly smoothed. Marching cubes surfaces stop where the last
+        voxel centers are, up to a voxel short of the casting wall, so the integral of the area falls a little short of
+        the propellant volume. That shortfall is the last sliver at the wall, so the curve is extended to burnout at
+        the final burning area instead of being rescaled. The volume is the integral of the area, which keeps mass and
+        burning area consistent. Returns (regression map levels, volumes, areas, shortfall fraction), or None when the
+        shortfall is above 12% of the volume and the areas cannot be trusted."""
+        levels, areas = np.asarray(levels, dtype=float), np.asarray(areas, dtype=float)
+        order = np.argsort(levels)
+        levels, areas = levels[order], areas[order]
+        distinct = np.concatenate([[True], np.diff(levels) > 1e-9])
+        levels, areas = levels[distinct], areas[distinct]
+        if len(levels) < 4 or areas.max() <= 0 or propellantVolume <= 0:
+            return None
+        step = 1.0 / self.mapDim  # Half a voxel in regression map units
+        grid = np.linspace(0.0, maxDist, max(int(np.ceil(maxDist / step)) + 1, 50))
+        area = np.nan_to_num(interpolate.PchipInterpolator(levels, areas, extrapolate=False)(grid), nan=0.0)
+        if grid.size >= 7:
+            area = savgol_filter(area, 5, 3)
+        area = np.maximum(area, 0.0)
+        toMeters = 0.5 * self.props['diameter'].getValue()
+        integral = np.trapz(area, grid * toMeters)
+        shortfall = (propellantVolume - integral) / propellantVolume
+        if not -0.12 < shortfall < 0.12:
+            return None
+        if shortfall > 0:
+            burning = np.nonzero(area > 0.02 * area.max())[0]
+            lastArea = float(area[burning[-1]])
+            extra = (propellantVolume - integral) / lastArea / toMeters  # Extra regression, in map units
+            grid = np.concatenate([grid, grid[-1] + np.arange(1, int(np.ceil(extra / step)) + 1) * step])
+            area = np.concatenate([area, np.full(grid.size - area.size, lastArea)])
+            area[area.size - 1] = 0.0
+            self._maxPolledDist = float(grid[-1])
+        regression = grid * toMeters
+        consumed = np.concatenate([[0.0], np.cumsum(0.5 * (area[1:] + area[:-1]) * np.diff(regression))])
+        volume = np.maximum(propellantVolume - consumed, 0.0)
+        volume[-1] = 0.0
+        return grid, volume, area, shortfall
 
     @staticmethod
     def _getAftPortCount(counts) -> int:
@@ -1170,7 +1214,13 @@ class Fmm3DGrain(Grain):
             # it the FMM propagates through ~21 % extra corner voxels and can't
             # terminate early at the cylinder boundary.
             _maskFull = np.ascontiguousarray(mask)
-            _maskedPhi = np.ma.MaskedArray(coreMapUninhib, _maskFull)
+            if self.SIGNED_DISTANCE:
+                # With propellant +1 and void -1 the surface lies halfway between voxel centers, so a distance of zero
+                # is the real surface. Measuring from the void voxel centers instead puts it half a voxel inside the
+                # propellant and makes the first marching cubes levels a staircase.
+                _maskedPhi = np.ma.MaskedArray(np.where(coreMapUninhib > 0.5, 1.0, -1.0), _maskFull)
+            else:
+                _maskedPhi = np.ma.MaskedArray(coreMapUninhib, _maskFull)
             _fmmResult = skfmm.distance(_maskedPhi, dx=cellSize)
             # Fill masked positions with max distance so marching-cubes never
             # sees a spurious zero-crossing at the cylinder boundary.
@@ -1215,14 +1265,21 @@ class Fmm3DGrain(Grain):
         _nCoarse = max(2, min(20, numLevels))
         _coarseLevels = np.linspace(0.0, maxDist, _nCoarse, endpoint=False).tolist()
 
+        # Masked voxels hold a large fill value that would read as a surface where the bore meets the casting wall,
+        # so marching cubes runs on a copy where they take the value of the nearest voxel inside the tube.
+        _mcField = regressionMapUninhib
+        if mask.ndim == 3 and mask.strides[0] == 0:
+            _, (_nearestRow, _nearestCol) = ndimage.distance_transform_edt(mask[0], return_indices=True)
+            _mcField = regressionMapUninhib[:, _nearestRow, _nearestCol]
+
         # Each level's total area is the sum of its per-layer areas, so the same pass records how the burning
         # surface is distributed along the grain for the mass flux calculation.
         _layerRows = {}
 
         def _areaPixelsAt(level):
             if not _hasLayerAreas:
-                return _marchingAreaPixels(regressionMapUninhib, valid, level)
-            layers = _marchingLayerAreas(regressionMapUninhib, valid, level)
+                return _marchingAreaPixels(_mcField, valid, level)
+            layers = _marchingLayerAreas(_mcField, valid, level)
             total = float(layers.sum())
             if total <= 0:
                 return None
@@ -1330,37 +1387,50 @@ class Fmm3DGrain(Grain):
             self.faceAreaFunc = interpolate.interp1d([0.0, 1.0], [0.0, 0.0])
             self.volumeFunc = None
         else:
-            # Compute volume curve and SA on a uniform grid so that
-            # _smoothSeries (SG filter) and np.gradient both see even spacing.
-            # The MC-derived adaptive 'polled' has non-uniform spacing that
-            # produces derivative artifacts at refinement boundaries.
-            _rmSorted = np.sort(regressionMapUninhib[valid].ravel())
-            _nVox = len(_rmSorted)
-            _nPts = max(len(polled), self.AREA_CURVE_POINTS)
-            _uniformPolled = np.linspace(0.0, maxDist, _nPts)
-            _idxs = np.searchsorted(_rmSorted, _uniformPolled, side='right')
-            _volCounts = self.mapToVolume(_nVox - _idxs.astype(float))
-            _smoothVol = _smoothSeries(_volCounts)
-            self.volumeFunc = interpolate.interp1d(
-                _uniformPolled, _smoothVol,
-                fill_value=(_smoothVol[0], 0.0),
-                bounds_error=False,
-            )
+            fromAreas = None
+            if self.CURVES_FROM_AREA:
+                propellantVoxels = int(np.count_nonzero((regressionMapUninhib > 0) & valid))
+                fromAreas = self._getCurvesFromAreas(polled, burningArea, self.mapToVolume(propellantVoxels), maxDist)
+            if fromAreas is not None:
+                _uniformPolled, _smoothVol, self.faceArea, self._areaShortfall = fromAreas
+                self.volumeFunc = interpolate.interp1d(
+                    _uniformPolled, _smoothVol, fill_value=(_smoothVol[0], 0.0), bounds_error=False
+                )
+                self.faceAreaFunc = interpolate.interp1d(
+                    _uniformPolled, self.faceArea, fill_value=(float(self.faceArea[0]), 0.0), bounds_error=False
+                )
+            else:
+                # Compute volume curve and SA on a uniform grid so that
+                # _smoothSeries (SG filter) and np.gradient both see even spacing.
+                # The MC-derived adaptive 'polled' has non-uniform spacing that
+                # produces derivative artifacts at refinement boundaries.
+                _rmSorted = np.sort(regressionMapUninhib[valid].ravel())
+                _nVox = len(_rmSorted)
+                _nPts = max(len(polled), self.AREA_CURVE_POINTS)
+                _uniformPolled = np.linspace(0.0, maxDist, _nPts)
+                _idxs = np.searchsorted(_rmSorted, _uniformPolled, side='right')
+                _volCounts = self.mapToVolume(_nVox - _idxs.astype(float))
+                _smoothVol = _smoothSeries(_volCounts)
+                self.volumeFunc = interpolate.interp1d(
+                    _uniformPolled, _smoothVol,
+                    fill_value=(_smoothVol[0], 0.0),
+                    bounds_error=False,
+                )
 
-            # Derive surface area from the volume curve via the co-area
-            # formula: SA(r) = -dV/dr.  This is exact for uniform regression
-            # and automatically consistent with the volume (mass) tracking,
-            # eliminating the phantom-thrust divergence that marching-cubes
-            # iso-surface area exhibits on complex geometries.
-            _diameter = self.props['diameter'].getValue()
-            _dr = _uniformPolled[1] - _uniformPolled[0]
-            _dVdMap = np.gradient(_smoothVol, _dr)
-            self.faceArea = np.maximum(-_dVdMap * (2.0 / _diameter), 0.0)
-            self.faceAreaFunc = interpolate.interp1d(
-                _uniformPolled, self.faceArea,
-                fill_value=(float(self.faceArea[0]), 0.0),
-                bounds_error=False,
-            )
+                # Derive surface area from the volume curve via the co-area
+                # formula: SA(r) = -dV/dr.  This is exact for uniform regression
+                # and automatically consistent with the volume (mass) tracking,
+                # eliminating the phantom-thrust divergence that marching-cubes
+                # iso-surface area exhibits on complex geometries.
+                _diameter = self.props['diameter'].getValue()
+                _dr = _uniformPolled[1] - _uniformPolled[0]
+                _dVdMap = np.gradient(_smoothVol, _dr)
+                self.faceArea = np.maximum(-_dVdMap * (2.0 / _diameter), 0.0)
+                self.faceAreaFunc = interpolate.interp1d(
+                    _uniformPolled, self.faceArea,
+                    fill_value=(float(self.faceArea[0]), 0.0),
+                    bounds_error=False,
+                )
 
         # Remove uninhibited disks, if necessary
         if self.props['inhibitedEnds'].getValue() in ['Top', 'Neither']:# BOTTOM
