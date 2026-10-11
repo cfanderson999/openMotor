@@ -630,7 +630,7 @@ class Fmm3DGrain(Grain):
     AREA_CURVE_POINTS = 50  # Samples of the volume curve whose slope gives the burning area
     CURVES_FROM_AREA = True  # Burning area comes from marching cubes areas instead of the slope of the volume curve
     SIGNED_DISTANCE = True  # Regression map is a signed distance with the surface at zero, not a distance from void voxel centers
-    _FMM_DIST_CACHE_VERSION = '4'   # bump to invalidate all cached entries
+    _FMM_DIST_CACHE_VERSION = '5'   # bump to invalidate all cached entries
     _FMM_DIST_CACHE_DIR: 'pathlib.Path | None' = None
 
     @classmethod
@@ -656,6 +656,15 @@ class Fmm3DGrain(Grain):
             maskBits = mask[0] if mask.ndim == 3 and mask.strides[0] == 0 else mask  # One slice stands for a prism
             h.update(np.packbits(np.ascontiguousarray(maskBits, dtype=bool)).data)
         return h.hexdigest()
+
+    @staticmethod
+    def _getWallRing(mask: np.ndarray) -> np.ndarray:
+        """Masked voxels that touch a valid voxel, diagonals included. These are the voxels a marching cube reaches from a
+        valid corner, so giving them real distances lets the burning surface run all the way to the casting wall."""
+        step = np.ones((3, 3), dtype=bool)
+        if mask.ndim == 3 and mask.strides[0] == 0:
+            return np.broadcast_to(ndimage.binary_dilation(~mask[0], structure=step) & mask[0], mask.shape)
+        return ndimage.binary_dilation(~mask, structure=step[np.newaxis]) & mask
 
     def _getMaskSignature(self):
         """Cheap fingerprint of the mask for the in-memory regression map cache."""
@@ -1206,21 +1215,35 @@ class Fmm3DGrain(Grain):
         valid = np.logical_not(mask)
 
         cellSize = 1 / self.mapDim
-        _fmmKey = self._computeFmmCacheKey(coreMapUninhib, cellSize, mask)
+        # Voxels just outside the wall are propellant for the distance field. A flat fill there hides the outermost half
+        # voxel of propellant from the burning surface, which delays burnout along tapered grains by tens of millimetres.
+        # OPENMOTOR_DISABLE_WALL_RING restores the flat fill, for comparison with results made before the ring existed.
+        _ringOn = os.environ.get('OPENMOTOR_DISABLE_WALL_RING', '').lower() not in ('1', 'true', 'yes')
+        _ring = self._getWallRing(mask) if _ringOn else np.zeros(mask.shape, dtype=bool)
+        # An exact Euclidean transform stands in for the fast marching distance. It runs on all cores and differs from
+        # the fast marching field by under 0.35 voxel. Masked voxels are not routed around, so a mask that is not
+        # convex can shorten distances.
+        _useEdt = self.SIGNED_DISTANCE and os.environ.get('OPENMOTOR_EXPERIMENTAL_EDT_DISTANCE', '').lower() in ('1', 'true', 'yes')
+        _fmmKey = self._computeFmmCacheKey(coreMapUninhib, cellSize, mask) + ('_edt' if _useEdt else '') + ('' if _ringOn else '_flat')
         regressionMapUninhib = self._loadFmmCache(_fmmKey)
+        if regressionMapUninhib is None and _useEdt:
+            from mathlib._edt import signed_distance
+            regressionMapUninhib = signed_distance((coreMapUninhib > 0.5) | _ring, valid | _ring, fill=self.mapDim)
+            regressionMapUninhib *= 2.0 / self.mapDim
+            self._saveFmmCache(_fmmKey, regressionMapUninhib)
         if regressionMapUninhib is None:
             # Apply the cylinder mask so skfmm skips outside-cylinder voxels.
             # This is the same pattern the 2-D PerforatedGrain path uses; without
             # it the FMM propagates through ~21 % extra corner voxels and can't
             # terminate early at the cylinder boundary.
-            _maskFull = np.ascontiguousarray(mask)
+            _maskFull = np.ascontiguousarray(mask & ~_ring)
             if self.SIGNED_DISTANCE:
                 # With propellant +1 and void -1 the surface lies halfway between voxel centers, so a distance of zero
                 # is the real surface. Measuring from the void voxel centers instead puts it half a voxel inside the
                 # propellant and makes the first marching cubes levels a staircase.
-                _maskedPhi = np.ma.MaskedArray(np.where(coreMapUninhib > 0.5, 1.0, -1.0), _maskFull)
+                _maskedPhi = np.ma.MaskedArray(np.where((coreMapUninhib > 0.5) | _ring, 1.0, -1.0), _maskFull)
             else:
-                _maskedPhi = np.ma.MaskedArray(coreMapUninhib, _maskFull)
+                _maskedPhi = np.ma.MaskedArray(np.where(_ring, 1.0, coreMapUninhib), _maskFull)
             _fmmResult = skfmm.distance(_maskedPhi, dx=cellSize)
             # Fill masked positions with max distance so marching-cubes never
             # sees a spurious zero-crossing at the cylinder boundary.
@@ -1265,12 +1288,13 @@ class Fmm3DGrain(Grain):
         _nCoarse = max(2, min(20, numLevels))
         _coarseLevels = np.linspace(0.0, maxDist, _nCoarse, endpoint=False).tolist()
 
-        # Masked voxels hold a large fill value that would read as a surface where the bore meets the casting wall,
-        # so marching cubes runs on a copy where they take the value of the nearest voxel inside the tube.
+        # Cubes start at valid voxels and reach at most one voxel into the masked ring, which holds real distances, so
+        # the surface meets the casting wall without a spurious crossing from the fill value beyond the ring. Without the
+        # ring, masked voxels take the value of the nearest voxel inside the tube instead.
         _mcField = regressionMapUninhib
-        if mask.ndim == 3 and mask.strides[0] == 0:
+        if not _ringOn and mask.ndim == 3 and mask.strides[0] == 0:
             _, (_nearestRow, _nearestCol) = ndimage.distance_transform_edt(mask[0], return_indices=True)
-            _mcField = regressionMapUninhib[:, _nearestRow, _nearestCol]
+            _mcField = np.ascontiguousarray(regressionMapUninhib[:, _nearestRow, _nearestCol])
 
         # Each level's total area is the sum of its per-layer areas, so the same pass records how the burning
         # surface is distributed along the grain for the mass flux calculation.

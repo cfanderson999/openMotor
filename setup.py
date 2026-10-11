@@ -50,6 +50,14 @@ extensions = [
         extra_link_args=_omp_link,
     ),
     Extension(
+        "mathlib._edt_cy",
+        ["mathlib/_edt_cy.pyx"],
+        define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],
+        include_dirs=[numpy.get_include()],
+        extra_compile_args=_omp_compile,
+        extra_link_args=_omp_link,
+    ),
+    Extension(
         "mathlib._levelset_cy",
         ["mathlib/_levelset_cy.pyx"],
         define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],

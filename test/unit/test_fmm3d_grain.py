@@ -579,5 +579,65 @@ class TestCapCache(unittest.TestCase):
         self.assertNotIn('dummy', self.grain._capCache)
 
 
+class TestWallRing(unittest.TestCase):
+    """The burning surface must reach the casting wall, so tapered grains burn out where the analytic grain does."""
+
+    @staticmethod
+    def _taperedGrain():
+        import motorlib.grains
+        grain = motorlib.grains.grainTypes['Conical']()
+        grain.setProperties({'diameter': 0.04763, 'length': 0.3, 'forwardCoreDiameter': 0.0145, 'aftCoreDiameter': 0.0229,
+                             'inhibitedEnds': 'Both'})
+        return grain
+
+    @staticmethod
+    def _config():
+        import motorlib.motor
+        config = motorlib.motor.MotorConfig()
+        config.setProperties({'maxPressure': 7e7, 'maxMassFlux': 1e4, 'maxMachNumber': 1, 'minPortThroat': 1,
+                              'flowSeparationWarnPercent': 0.05, 'burnoutWebThres': 2.54e-5, 'burnoutThrustThres': 0.1,
+                              'timestep': 0.03, 'ambPressure': 101325, 'mapDim': 750, '3DmapDim': 64,
+                              'sepPressureRatio': 0.4, 'convertTo3D': False})
+        return config
+
+    def _tailError(self, ringDisabled):
+        from unittest import mock
+        grain = self._taperedGrain()
+        converted = grain.convertTo3D()
+        env = {'OPENMOTOR_DISABLE_WALL_RING': '1' if ringDisabled else '0'}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(Fmm3DGrain, '_loadFmmCache', lambda self, key: None), \
+                mock.patch.object(Fmm3DGrain, '_saveFmmCache', lambda self, key, data: None):
+            converted.simulationSetup(self._config())
+        distance = 0.8 * grain.getWebLeft(0)
+        return converted.getSurfaceAreaAtRegression(distance) / grain.getSurfaceAreaAtRegression(distance) - 1.0
+
+    def test_ring_shrinks_the_late_burn_deficit(self):
+        flat, ring = self._tailError(True), self._tailError(False)
+        self.assertLess(flat, -0.04)
+        self.assertGreater(ring, flat + 0.04)
+
+    def test_ring_leaves_the_early_burn_alone(self):
+        from unittest import mock
+        grain = self._taperedGrain()
+        areas = []
+        for disabled in ('1', '0'):
+            converted = grain.convertTo3D()
+            with mock.patch.dict(os.environ, {'OPENMOTOR_DISABLE_WALL_RING': disabled}), \
+                    mock.patch.object(Fmm3DGrain, '_loadFmmCache', lambda self, key: None), \
+                    mock.patch.object(Fmm3DGrain, '_saveFmmCache', lambda self, key, data: None):
+                converted.simulationSetup(self._config())
+            areas.append(converted.getSurfaceAreaAtRegression(0.25 * grain.getWebLeft(0)))
+        self.assertAlmostEqual(areas[1] / areas[0], 1.0, delta=0.005)
+
+    def test_wall_ring_touches_only_masked_voxels_beside_valid_ones(self):
+        mask = np.ones((3, 9, 9), dtype=bool)
+        mask[:, 3:6, 3:6] = False
+        ring = Fmm3DGrain._getWallRing(mask)
+        self.assertFalse(ring[:, 3:6, 3:6].any())
+        self.assertTrue(ring[:, 2:7, 2:7][:, ~np.pad(np.ones((3, 3), bool), 1)].all())
+        self.assertFalse(ring[:, 0, :].any())
+
+
 if __name__ == '__main__':
     unittest.main()
