@@ -5,9 +5,9 @@ import numpy as np
 
 from motorlib.grains import Finocyl
 
-from motorlib.srm1d import FlowProperties, advanceFlow, BurnbackGrid, runBurn, chooseStride
+from motorlib.srm1d import FlowProperties, advanceFlow, BurnbackGrid, BurnSimulation, runBurn, chooseStride
 from motorlib.srm1d.quasisteady import advanceQuasiSteady
-from motorlib.srm1d.coupled import _seedSteadyState
+from motorlib.srm1d.coupled import _seedSteadyState, _FlowGrid
 from motorlib.srm1d.coupled import MA2020_VALIDATED
 from motorlib.srm1d.burn_rate import surface_temperature, erosive_energy_factor, compute_burn_rates
 from motorlib.srm1d.surface import (apSurfaceTemperature, binderSurfaceTemperature, surfaceTables, apSurfaceEnthalpy,
@@ -258,6 +258,62 @@ class TestCoupledBurn(unittest.TestCase):
         fine = runBurn(BurnbackGrid(phi, valid, voxel), flowStride=1, **kwargs)
         coarse = runBurn(BurnbackGrid(phi, valid, voxel), flowStride=chooseStride(_SLICES - 1, 5 * voxel, voxel), **kwargs)
         self.assertAlmostEqual(coarse.headPressure[-1] / fine.headPressure[-1], 1.0, delta=0.01)
+
+
+class TestFlowGrid(unittest.TestCase):
+    def test_cells_that_are_whole_slab_groups_average_like_a_reshape(self):
+        grid = _FlowGrid(12, 0.5, 4)
+        perSlab = np.arange(12.0)
+        np.testing.assert_allclose(grid.average(perSlab), perSlab.reshape(4, 3).mean(axis=1))
+        np.testing.assert_allclose(grid.centers, 0.5 * (np.arange(4) * 3 + 1.5))
+
+    def test_cells_that_split_slabs_keep_the_total(self):
+        grid = _FlowGrid(10, 1.0, 4)
+        perSlab = np.random.default_rng(2).random(10)
+        self.assertAlmostEqual(float(grid.average(perSlab).sum() * grid.length), float(perSlab.sum()), places=12)
+        self.assertAlmostEqual(grid.length, 2.5)
+
+
+class TestBurnSimulation(unittest.TestCase):
+    def _sim(self, **kwargs):
+        phi, valid, voxel = _cylinderField()
+        return BurnSimulation(_AnalyticBore(voxel), _flowProperties(), 0.0064, **kwargs), voxel
+
+    def test_advancing_by_a_duration_lands_on_it(self):
+        sim, _ = self._sim()
+        for duration in (0.03, 0.0123, 0.05):
+            before = sim.t
+            sim.advance(duration)
+            self.assertAlmostEqual(sim.t - before, duration, places=9)
+
+    def test_stepping_in_pieces_matches_one_run(self):
+        pieces, _ = self._sim()
+        for _ in range(10):
+            pieces.advance(0.03)
+        whole = runBurn(_AnalyticBore(_cylinderField()[2]), _flowProperties(), 0.0064, tMax=0.3, pCutoff=0.0)
+        self.assertAlmostEqual(pieces.pressure[0] / np.interp(pieces.t, whole.time, whole.headPressure), 1.0, delta=0.01)
+
+    def test_odd_durations_leave_no_sliver_that_collapses_the_pressure(self):
+        sim, _ = self._sim()
+        sim.advance(0.01)
+        start = sim.pressure[0]
+        for _ in range(40):
+            sim.advance(0.00731)
+            self.assertGreater(sim.pressure[0], 0.5 * start)
+        self.assertGreater(min(np.diff(sim.result.time)), 1e-5)
+
+    def test_a_cell_length_that_does_not_divide_the_slabs_is_accepted(self):
+        sim, voxel = self._sim(cellLength=7.3 * _CASTING / _VOXEL_COUNT)
+        self.assertAlmostEqual(sim.flowGrid.length * sim.flowGrid.cells, (_SLICES - 1) * voxel, places=12)
+        sim.advance(0.02)
+        self.assertGreater(sim.pressure[0], 101325.0)
+
+    def test_the_throat_follows_erosion_and_slag(self):
+        sim, _ = self._sim(throatErosionCoeff=1e-9, throatSlagCoeff=1e-3)
+        before = sim.throat
+        sim.advance(0.05)
+        expected = sum((2e-9 * p - 2e-3 / p) * dt for p, dt in zip(sim.result.headPressure, np.diff([0.0] + sim.result.time)))
+        self.assertAlmostEqual(sim.throat - before, expected, delta=0.05 * abs(expected))
 
 
 class TestQuasiSteadyFlow(unittest.TestCase):

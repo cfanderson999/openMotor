@@ -44,7 +44,7 @@ def _solveNozzlePressure(guess, stored, source, T, aThroat, gamma, rSpecific, pA
 
 @njit(cache=True, fastmath=True)
 def _steadyFlow(P, Pold, rho, u, T, aPort, dHyd, massSource, dx, n, dt, aThroat, pAmbient, tAmbient, gamma, rSpecific,
-                muGas, roughness, flux, velocityCell, fDarcy, Re):
+                muGas, roughness, flux, velocityCell, fDarcy, Re, inertiaScale):
     """Solves the quasi-steady flow for one substep and writes the result into P, rho and u. Returns the nozzle mass flow."""
     Pk = Pold.copy()
     fluxOld = flux.copy()
@@ -83,7 +83,7 @@ def _steadyFlow(P, Pold, rho, u, T, aPort, dHyd, massSource, dx, n, dt, aThroat,
     densityRise = (x - Pold[n - 1]) / (rSpecific * T[n - 1])
     for j in range(1, n):
         rhoOld = 0.5 * (Pold[j - 1] / (rSpecific * T[j - 1]) + Pold[j] / (rSpecific * T[j]))
-        inertiaForce[j] = ((flux[j] - fluxOld[j]) / aFace[j] - flux[j] / (rhoOld * aFace[j]) * densityRise) / dt
+        inertiaForce[j] = inertiaScale * ((flux[j] - fluxOld[j]) / aFace[j] - flux[j] / (rhoOld * aFace[j]) * densityRise) / dt
 
     for _ in range(PICARD_ITERATIONS):
         for i in range(n):
@@ -179,6 +179,8 @@ def advanceQuasiSteady(
             if isBurning[i] and kappaZn > 0.0 and solidAlpha > 0.0 and rDyn[i] > 0.0:
                 shortest = min(shortest, kappaZn * solidAlpha / max(rDyn[i], 1e-4) ** 2)
         dt = min(maxSubStep, lagFraction * shortest, tSpan - elapsed)
+        if 0.0 < tSpan - elapsed - dt < 0.5 * dt:  # fold a sliver of a step into this one
+            dt = tSpan - elapsed
 
         for i in range(n):
             if not isBurning[i]:
@@ -195,8 +197,15 @@ def advanceQuasiSteady(
 
         for i in range(n):
             Pold[i] = P[i]
+        rhoSaved, uSaved, fluxSaved = rho.copy(), u.copy(), flux.copy()
         mdot = _steadyFlow(P, Pold, rho, u, T, aPort, dHyd, massSource, dx, n, dt, aThroat, pAmbient, tAmbient, gamma,
-                           rSpecific, muGas, roughness, flux, uCell, fDarcy, Re)
+                           rSpecific, muGas, roughness, flux, uCell, fDarcy, Re, 1.0)
+        if P.min() <= 1.5 * PRESSURE_FLOOR:
+            # The momentum march ran out of pressure, as it does when the flow changes abruptly over a very short substep.
+            # The inertia term is a correction, so the substep is redone without it.
+            rho[:], u[:], flux[:] = rhoSaved, uSaved, fluxSaved
+            mdot = _steadyFlow(P, Pold, rho, u, T, aPort, dHyd, massSource, dx, n, dt, aThroat, pAmbient, tAmbient, gamma,
+                               rSpecific, muGas, roughness, flux, uCell, fDarcy, Re, 0.0)
         _postPisoUpdate(rho, u, P, T, dHyd, Re, Mach, uCell, fDarcy, n, muGas, gamma, rSpecific, roughness)
         massNozzle += mdot * dt
         elapsed += dt

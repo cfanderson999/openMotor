@@ -24,6 +24,8 @@ class BurnbackGrid:
         self.valid = np.broadcast_to(valid, phi.shape).copy()
         self.phi = np.asarray(phi, dtype=np.float64).copy()
         self.elapsed = 0.0
+        self.slabRegression = np.zeros(phi.shape[0] - 1)
+        self.grainSlices = None
         if not np.all(self.valid == self.valid[0]):
             raise ValueError("valid mask must be identical on every axial slice")
         _, (self._nearestRow, self._nearestCol) = ndimage.distance_transform_edt(~self.valid[0], return_indices=True)
@@ -82,6 +84,7 @@ class BurnbackGrid:
             self.phi = advance_level_set(self.phi, self.marchValid[0], np.maximum(sliceSpeed, floor), self.voxel, dt)
         else:
             self._advanceScikitFmm(sliceSpeed, floor, dt)
+        self.slabRegression = self.slabRegression + np.asarray(slabSpeed) * dt
         self.elapsed += dt
 
     def _advanceScikitFmm(self, sliceSpeed: np.ndarray, floor: float, dt: float) -> None:

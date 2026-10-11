@@ -28,6 +28,13 @@ class Propellant(PropertyCollection):
         self.props['name'] = StringProperty('Name')
         self.props['density'] = FloatProperty('Density', 'kg/m^3', 1, 10000)
         self.props['tabs'] = TabularProperty('Properties', PropellantTab)
+        # Only erosive burning uses these, and zero means "not entered". The gas values are the frozen composition
+        # chamber values from CEA (not the equilibrium ones, which overstate erosion by about 45 percent).
+        self.props['gasSpecificHeat'] = FloatProperty('Combustion Gas Specific Heat', 'J/(kg*K)', 0, 10000)
+        self.props['gasViscosity'] = FloatProperty('Combustion Gas Viscosity', 'Pa*s', 0, 1e-3)
+        self.props['gasConductivity'] = FloatProperty('Combustion Gas Thermal Conductivity', 'W/(m*K)', 0, 5)
+        self.props['solidSpecificHeat'] = FloatProperty('Propellant Specific Heat', 'J/(kg*K)', 0, 10000)
+        self.props['apVolumeFraction'] = FloatProperty('Ammonium Perchlorate Volume Fraction', '', 0, 1)
         if propDict is not None:
             self.setProperties(propDict)
 
@@ -114,6 +121,21 @@ class Propellant(PropertyCollection):
                         err = 'Tabs #{} and #{} have overlapping ranges.'.format(tabId + 1, otherTabId + 1)
                         errors.append(SimAlert(SimAlertLevel.ERROR, SimAlertType.VALUE, err, 'Propellant'))
         return errors
+
+    EROSIVE_REQUIRED = {
+        'gasSpecificHeat': 'combustion gas specific heat', 'gasViscosity': 'combustion gas viscosity',
+        'gasConductivity': 'combustion gas thermal conductivity', 'solidSpecificHeat': 'propellant specific heat',
+    }
+
+    def getErosiveErrors(self):
+        """Returns an error for every property erosive burning needs that has not been entered. None of them has a
+        default, because a wrong value changes the erosive burn rate directly and a substitute would be a guess."""
+        missing = [name for key, name in self.EROSIVE_REQUIRED.items() if self.getProperty(key) <= 0]
+        if not missing:
+            return []
+        text = 'Erosive burning needs the propellant\'s {}. Take the gas values from a frozen-composition CEA run.'.format(
+            ', '.join(missing))
+        return [SimAlert(SimAlertLevel.ERROR, SimAlertType.VALUE, text, 'Propellant')]
 
     def getPressureErrors(self, pressure):
         """Returns if the propellant has any errors associated with the supplied pressure such as not having set

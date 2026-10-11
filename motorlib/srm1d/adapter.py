@@ -24,7 +24,11 @@ def burnbackFromFmm3dGrains(grains, advanceMethod: str = 'narrow-band', wallRing
         sameTube = np.array_equal(~np.asarray(grain.mask[0], dtype=bool), valid)
         if not sameTube or not np.isclose(grain.props['diameter'].getValue() / grain.mapDim, voxel):
             raise ValueError("stacked grains must share diameter, map dimension and casting mask")
-    return BurnbackGrid.fromMask(np.concatenate([_headToNozzleSlices(g) for g in grains], axis=0), valid, voxel, advanceMethod, wallRing)
+    stacks = [_headToNozzleSlices(g) for g in grains]
+    grid = BurnbackGrid.fromMask(np.concatenate(stacks, axis=0), valid, voxel, advanceMethod, wallRing)
+    edges = np.concatenate([[0], np.cumsum([len(stack) for stack in stacks])])
+    grid.grainSlices = [(int(a), int(b)) for a, b in zip(edges[:-1], edges[1:])]
+    return grid
 
 
 def burnbackFromFmm3dGrain(grain, advanceMethod: str = 'narrow-band', wallRing: bool = True) -> BurnbackGrid:

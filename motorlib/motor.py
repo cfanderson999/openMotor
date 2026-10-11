@@ -14,6 +14,7 @@ from .propellant import Propellant
 from .properties import BooleanProperty, FloatProperty, IntProperty, PropertyCollection
 from .simResult import SimAlert, SimAlertLevel, SimAlertType, SimulationResult
 from .grain import Fmm3DGrain, Grain, _GrainSetupCanceled
+from .burnmodels import SteadyBurn
 
 
 class MotorConfig(PropertyCollection):
@@ -56,6 +57,14 @@ class MotorConfig(PropertyCollection):
         self.props["sepPressureRatio"] = FloatProperty(
             "Separation Pressure Ratio", "", 0.001, 1
         )
+        # Erosive burning solves the gas flow along the bore and lets the burn rate follow the local flow. It runs on the
+        # 3D FMM version of every grain, so it implies the conversion.
+        self.props["erosiveBurning"] = BooleanProperty("Simulate Erosive Burning")
+        self.props["erosiveBurning"].setValue(False)
+        self.props["erosiveRoughness"] = FloatProperty("Erosive Burning Bore Roughness", "m", 0, 1e-3)
+        self.props["erosiveRoughness"].setValue(32e-6)
+        self.props["erosiveCellLength"] = FloatProperty("Erosive Burning Flow Cell Length", "m", 5e-4, 0.1)
+        self.props["erosiveCellLength"].setValue(5e-3)
 
 
 class Motor:
@@ -70,6 +79,7 @@ class Motor:
         self.nozzle = Nozzle()
         self.config = MotorConfig()
         self.conversionNotes = []
+        self.isConvertedTo3D = False  # True for the copy that getWithGrainsConvertedTo3D returns
 
         if propDict is not None:
             self.applyDict(propDict)
@@ -139,6 +149,7 @@ class Motor:
             results = [self._convertGrainTo3D(grain) for grain in self.grains]
         converted.grains = [grain for grain, _ in results]
         converted.conversionNotes = [(gid, note) for gid, (_, note) in enumerate(results) if note is not None]
+        converted.isConvertedTo3D = True
         return converted
 
     def calcBurningSurfaceArea(self, regDepth):
@@ -227,30 +238,9 @@ class Motor:
 
         return max(M, 0)
 
-    def runSimulation(self, callback=None, onSimStart=None) -> SimulationResult:
-        """Runs a simulation of the motor and returns a simRes instance with the results. Constraints are checked,
-        including the number of grains, if the motor has a propellant set, and if the grains have geometry errors. If
-        all of these tests are passed, the motor's operation is simulated by calculating Kn, using this value to get
-        pressure, and using pressure to determine thrust and other statistics. The next timestep is then prepared by
-        using the pressure to determine how the motor will regress in the given timestep at the current pressure.
-        This process is repeated and regression tracked until all grains have burned out, when the results and any
-        warnings are returned."""
-        if self.config.getProperty("convertTo3D"):
-            converted = self.getWithGrainsConvertedTo3D()
-            simRes = converted.runSimulation(callback, onSimStart)
-            for gid, note in converted.conversionNotes:
-                description = "{} grain was simulated normally because {}".format(self.grains[gid].geomName, note)
-                simRes.addAlert(
-                    SimAlert(SimAlertLevel.WARNING, SimAlertType.CONSTRAINT, description, "Grain {}".format(gid + 1))
-                )
-            return simRes
-
-        burnoutWebThres = self.config.getProperty("burnoutWebThres")
-        burnoutThrustThres = self.config.getProperty("burnoutThrustThres")
-        dTime = self.config.getProperty("timestep")
-
-        simRes = SimulationResult(self)
-
+    def _checkInputs(self, simRes):
+        """Adds the alerts that come from the motor's inputs to the result, and returns whether any are errors that
+        stop the simulation."""
         # Check for geometry errors
         if len(self.grains) == 0:
             aText = "Motor must have at least one propellant grain"
@@ -288,63 +278,22 @@ class Motor:
         else:
             for alert in self.propellant.getErrors():
                 simRes.addAlert(alert)
+        if self.config.getProperty("erosiveBurning"):
+            if self.propellant is not None:
+                for alert in self.propellant.getErosiveErrors():
+                    simRes.addAlert(alert)
+            notes = dict(self.conversionNotes)
+            for gid, grain in enumerate(self.grains):
+                if not isinstance(grain, Fmm3DGrain):
+                    reason = notes.get(gid, "it is not a 3D FMM grain")
+                    text = "{} grain cannot be simulated with erosive burning because {}".format(grain.geomName, reason)
+                    simRes.addAlert(
+                        SimAlert(SimAlertLevel.ERROR, SimAlertType.CONSTRAINT, text, "Grain {}".format(gid + 1))
+                    )
+        return len(simRes.getAlertsByLevel(SimAlertLevel.ERROR)) > 0
 
-        # If any errors occurred, stop simulation and return an empty sim with errors
-        if len(simRes.getAlertsByLevel(SimAlertLevel.ERROR)) > 0:
-            return simRes
-
-        # Pull the required numbers from the propellant
-        density = self.propellant.getProperty("density")
-
-        # Generate coremaps for perforated grains (must come before calcTotalVolume
-        # so 3D grains have totalLength set).
-        # 3D FMM grains are expensive to set up (voxelization + FMM + MC sweep).
-        # When the motor has more than one grain, set them up in parallel using
-        # threads — grains are fully independent and the GIL is not needed for
-        # the heavy NumPy/Cython work.
-        if len(self.grains) > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-            _workers = min(len(self.grains), os.cpu_count() or 1)
-            with ThreadPoolExecutor(max_workers=_workers) as _pool:
-                _futs = {_pool.submit(g.simulationSetup, self.config): g
-                         for g in self.grains}
-                for _fut in as_completed(_futs):
-                    _fut.result()  # re-raise any grain-setup exceptions
-        else:
-            for grain in self.grains:
-                grain.simulationSetup(self.config)
-
-        if onSimStart is not None:
-            onSimStart()
-
-        # Precalculate these as they don't change
-        motorVolume = self.calcTotalVolume()
-
-        # Setup initial values
-        perGrainReg = [0 for grain in self.grains]
-
-        # At t = 0, the motor has ignited
-        simRes.channels["time"].addData(0)
-        simRes.channels["kn"].addData(self.calcKN(perGrainReg, 0))
-        simRes.channels["pressure"].addData(
-            self.calcIdealPressure(perGrainReg, 0, None)
-        )
-        simRes.channels["force"].addData(0)
-        simRes.channels["mass"].addData(
-            [grain.getVolumeAtRegression(0) * density for grain in self.grains]
-        )
-        simRes.channels["volumeLoading"].addData(
-            100 * (1 - (self.calcFreeVolume(perGrainReg) / motorVolume))
-        )
-        simRes.channels["massFlow"].addData([0 for grain in self.grains])
-        simRes.channels["massFlux"].addData([0 for grain in self.grains])
-        simRes.channels["regression"].addData([0 for grains in self.grains])
-        simRes.channels["web"].addData([grain.getWebLeft(0) for grain in self.grains])
-        simRes.channels["exitPressure"].addData(0)
-        simRes.channels["dThroat"].addData(0)
-        simRes.channels["machNumber"].addData([0 for grain in self.grains])
-
-        # Check port/throat ratio and add a warning if it is not large enough
+    def _checkPortThroatRatio(self, simRes):
+        """Adds a warning when the aft grain's initial port is not large enough compared to the throat."""
         aftPort = self.grains[-1].getPortArea(0)
         if aftPort is not None:
             minAllowed = self.config.getProperty("minPortThroat")
@@ -366,100 +315,9 @@ class Motor:
                     )
                 )
 
-        # Perform timesteps
-        while simRes.shouldContinueSim(burnoutThrustThres):
-            # Calculate regression
-            massFlow = 0
-            perGrainMass = [0 for grain in self.grains]
-            perGrainMassFlow = [0 for grain in self.grains]
-            perGrainMassFlux = [0 for grain in self.grains]
-            perGrainWeb = [0 for grain in self.grains]
-            for gid, grain in enumerate(self.grains):
-                if grain.getWebLeft(perGrainReg[gid]) > burnoutWebThres:
-                    # Calculate regression at the current pressure
-                    reg = dTime * self.propellant.getBurnRate(
-                        simRes.channels["pressure"].getLast()
-                    )
-                    # Find the mass flux through the grain based on the mass flow fed into from grains above it
-                    perGrainMassFlux[gid] = grain.getPeakMassFlux(
-                        massFlow, dTime, perGrainReg[gid], reg, density
-                    )
-                    # Find the mass of the grain after regression
-                    perGrainMass[gid] = (
-                        grain.getVolumeAtRegression(perGrainReg[gid]) * density
-                    )
-                    # Add the change in grain mass to the mass flow
-                    massFlow += (
-                        simRes.channels["mass"].getLast()[gid] - perGrainMass[gid]
-                    ) / dTime
-                    # Apply the regression
-                    perGrainReg[gid] += reg
-                    perGrainWeb[gid] = grain.getWebLeft(perGrainReg[gid])
-                perGrainMassFlow[gid] = massFlow
-            simRes.channels["regression"].addData(perGrainReg[:])
-            simRes.channels["web"].addData(perGrainWeb)
-
-            simRes.channels["volumeLoading"].addData(
-                100 * (1 - (self.calcFreeVolume(perGrainReg) / motorVolume))
-            )
-            simRes.channels["mass"].addData(perGrainMass)
-            simRes.channels["massFlow"].addData(perGrainMassFlow)
-            simRes.channels["massFlux"].addData(perGrainMassFlux)
-
-            # Calculate KN
-            dThroat = simRes.channels["dThroat"].getLast()
-            simRes.channels["kn"].addData(self.calcKN(perGrainReg, dThroat))
-
-            # Calculate Pressure
-            lastKn = simRes.channels["kn"].getLast()
-            pressure = self.calcIdealPressure(perGrainReg, dThroat, lastKn)
-            simRes.channels["pressure"].addData(pressure)
-
-            # Calculate Mach Number
-            perGrainMachNumber = [0 for grain in self.grains]
-            for gid, grain in enumerate(self.grains):
-                perGrainMachNumber[gid] = self.calcMachNumber(
-                    pressure, perGrainMassFlux[gid]
-                )
-            simRes.channels["machNumber"].addData(perGrainMachNumber)
-
-            # Calculate Exit Pressure
-            _, _, gamma, _, _ = self.propellant.getCombustionProperties(pressure)
-            exitPressure = self.nozzle.getExitPressure(gamma, pressure)
-            simRes.channels["exitPressure"].addData(exitPressure)
-
-            # Calculate force
-            force = self.calcForce(
-                simRes.channels["pressure"].getLast(), dThroat, exitPressure
-            )
-            simRes.channels["force"].addData(force)
-
-            simRes.channels["time"].addData(simRes.channels["time"].getLast() + dTime)
-
-            # Calculate any slag deposition or erosion of the throat
-            if pressure == 0:
-                slagRate = 0
-            else:
-                slagRate = (1 / pressure) * self.nozzle.getProperty("slagCoeff")
-            erosionRate = pressure * self.nozzle.getProperty("erosionCoeff")
-            change = dTime * ((-2 * slagRate) + (2 * erosionRate))
-            simRes.channels["dThroat"].addData(dThroat + change)
-
-            if callback is not None:
-                # Uses the grain with the largest percentage of its web left
-                progress = max(
-                    [
-                        g.getWebLeft(r) / g.getWebLeft(0)
-                        for g, r in zip(self.grains, perGrainReg)
-                    ]
-                )
-                if callback(
-                    1 - progress
-                ):  # If the callback returns true, it is time to cancel
-                    return simRes
-
-        simRes.success = True
-
+    def _checkResults(self, simRes):
+        """Adds the alerts that come from the finished simulation's data."""
+        burnoutThrustThres = self.config.getProperty("burnoutThrustThres")
         if simRes.getPeakMassFlux() > self.config.getProperty("maxMassFlux"):
             desc = "Peak mass flux exceeded configured limit"
             alert = SimAlert(
@@ -510,7 +368,137 @@ class Motor:
                     simRes.addAlert(err[0])
                     break
 
+    def runSimulation(self, callback=None, onSimStart=None) -> SimulationResult:
+        """Runs a simulation of the motor and returns a simRes instance with the results. Constraints are checked,
+        including the number of grains, if the motor has a propellant set, and if the grains have geometry errors. If
+        all of these tests are passed, the motor is stepped through time by a burn model: in the normal simulation each
+        grain regresses at the burn rate of the last pressure and the pressure is the steady one for the motor's Kn, with
+        erosive burning the burn rate follows the gas flow along the bore. The pressure then gives thrust and the other
+        statistics. This repeats until the thrust has died away, when the results and any warnings are returned."""
+        erosive = self.config.getProperty("erosiveBurning")
+        if (self.config.getProperty("convertTo3D") or erosive) and not self.isConvertedTo3D:
+            converted = self.getWithGrainsConvertedTo3D()
+            simRes = converted.runSimulation(callback, onSimStart)
+            if not erosive:
+                for gid, note in converted.conversionNotes:
+                    description = "{} grain was simulated normally because {}".format(self.grains[gid].geomName, note)
+                    simRes.addAlert(
+                        SimAlert(SimAlertLevel.WARNING, SimAlertType.CONSTRAINT, description, "Grain {}".format(gid + 1))
+                    )
+            return simRes
+
+        dTime = self.config.getProperty("timestep")
+        burnoutThrustThres = self.config.getProperty("burnoutThrustThres")
+
+        simRes = SimulationResult(self)
+
+        # If any errors occurred, stop simulation and return an empty sim with errors
+        if self._checkInputs(simRes):
+            return simRes
+
+        # Generate coremaps for perforated grains (must come before calcTotalVolume
+        # so 3D grains have totalLength set).
+        # 3D FMM grains are expensive to set up (voxelization + FMM + MC sweep).
+        # When the motor has more than one grain, set them up in parallel using
+        # threads — grains are fully independent and the GIL is not needed for
+        # the heavy NumPy/Cython work.
+        if len(self.grains) > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            _workers = min(len(self.grains), os.cpu_count() or 1)
+            with ThreadPoolExecutor(max_workers=_workers) as _pool:
+                _futs = {_pool.submit(g.simulationSetup, self.config): g
+                         for g in self.grains}
+                for _fut in as_completed(_futs):
+                    _fut.result()  # re-raise any grain-setup exceptions
+        else:
+            for grain in self.grains:
+                grain.simulationSetup(self.config)
+
+        model = self._makeBurnModel()
+
+        if onSimStart is not None:
+            onSimStart()
+
+        # At t = 0, the motor has ignited
+        step = model.initial()
+        simRes.channels["time"].addData(0)
+        simRes.channels["kn"].addData(step.kn)
+        simRes.channels["pressure"].addData(step.pressure)
+        simRes.channels["force"].addData(0)
+        simRes.channels["mass"].addData(step.mass)
+        simRes.channels["volumeLoading"].addData(step.volumeLoading)
+        simRes.channels["massFlow"].addData(step.massFlow)
+        simRes.channels["massFlux"].addData(step.massFlux)
+        simRes.channels["regression"].addData(step.regression)
+        simRes.channels["web"].addData(step.web)
+        simRes.channels["exitPressure"].addData(0)
+        simRes.channels["dThroat"].addData(0)
+        simRes.channels["machNumber"].addData([0 for grain in self.grains])
+
+        self._checkPortThroatRatio(simRes)
+
+        # Perform timesteps
+        while simRes.shouldContinueSim(burnoutThrustThres):
+            dThroat = simRes.channels["dThroat"].getLast()
+            step = model.step(dTime, dThroat, step)
+            simRes.channels["regression"].addData(step.regression)
+            simRes.channels["web"].addData(step.web)
+            simRes.channels["volumeLoading"].addData(step.volumeLoading)
+            simRes.channels["mass"].addData(step.mass)
+            simRes.channels["massFlow"].addData(step.massFlow)
+            simRes.channels["massFlux"].addData(step.massFlux)
+            simRes.channels["kn"].addData(step.kn)
+            pressure = step.pressure
+            simRes.channels["pressure"].addData(pressure)
+
+            # Calculate Mach Number
+            perGrainMachNumber = step.machNumber
+            if perGrainMachNumber is None:
+                perGrainMachNumber = [self.calcMachNumber(pressure, flux) for flux in step.massFlux]
+            simRes.channels["machNumber"].addData(perGrainMachNumber)
+
+            # Calculate Exit Pressure
+            _, _, gamma, _, _ = self.propellant.getCombustionProperties(pressure)
+            exitPressure = self.nozzle.getExitPressure(gamma, pressure)
+            simRes.channels["exitPressure"].addData(exitPressure)
+
+            # Calculate force
+            force = self.calcForce(
+                simRes.channels["pressure"].getLast(), dThroat, exitPressure
+            )
+            simRes.channels["force"].addData(force)
+
+            simRes.channels["time"].addData(simRes.channels["time"].getLast() + dTime)
+
+            # Calculate any slag deposition or erosion of the throat
+            if pressure == 0:
+                slagRate = 0
+            else:
+                slagRate = (1 / pressure) * self.nozzle.getProperty("slagCoeff")
+            erosionRate = pressure * self.nozzle.getProperty("erosionCoeff")
+            change = dTime * ((-2 * slagRate) + (2 * erosionRate))
+            simRes.channels["dThroat"].addData(dThroat + change)
+
+            if callback is not None:
+                # Uses the grain with the largest percentage of its web left
+                progress = model.progress(step)
+                if callback(progress):  # If the callback returns true, it is time to cancel
+                    return simRes
+
+        simRes.success = True
+
+        self._checkResults(simRes)
+        for alert in model.getAlerts():
+            simRes.addAlert(alert)
+
         return simRes
+
+    def _makeBurnModel(self):
+        """The burn model the config asks for."""
+        if self.config.getProperty("erosiveBurning"):
+            from .burnmodels import ErosiveBurn
+            return ErosiveBurn(self)
+        return SteadyBurn(self)
 
     def getQuickResults(self, cancelCheck=None, statusCb=None):
         results = {
