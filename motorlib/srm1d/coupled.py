@@ -181,6 +181,13 @@ class BurnSimulation:
     def machCells(self):
         return np.abs(self.work['Mach'])
 
+    def burnRateCells(self):
+        return self.work['rTotal']
+
+    def erosiveRatioCells(self):
+        """The erosive part of the burn rate over the rest of it, in every flow cell."""
+        return self.work['rErosive'] / np.maximum(self.work['rTotal'] - self.work['rErosive'], 1e-12)
+
     def _runSpan(self, span):
         props, work, geometry, flowGrid, result = self.props, self.work, self.geometry, self.flowGrid, self.result
         n, dx, x = flowGrid.cells, flowGrid.length, flowGrid.centers

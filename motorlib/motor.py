@@ -434,6 +434,7 @@ class Motor:
         simRes.channels["exitPressure"].addData(0)
         simRes.channels["dThroat"].addData(0)
         simRes.channels["machNumber"].addData([0 for grain in self.grains])
+        simRes.coreProfiles.append(step.coreProfiles)
 
         self._checkPortThroatRatio(simRes)
 
@@ -456,6 +457,7 @@ class Motor:
             if perGrainMachNumber is None:
                 perGrainMachNumber = [self.calcMachNumber(pressure, flux) for flux in step.massFlux]
             simRes.channels["machNumber"].addData(perGrainMachNumber)
+            simRes.coreProfiles.append(step.coreProfiles)
 
             # Calculate Exit Pressure
             _, _, gamma, _, _ = self.propellant.getCombustionProperties(pressure)

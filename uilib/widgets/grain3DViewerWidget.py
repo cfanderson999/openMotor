@@ -442,6 +442,18 @@ class Grain3DViewerWidget(QWidget):
         value = profile.metrics[metric.key][sliceZ] if profile is not None else float('nan')
         self._legend.setReadout('At crosshair (slice {})'.format(sliceZ), value)
 
+    def _mapDists(self) -> tuple:
+        """Normalised regression to draw the core at for the axial plane and for the side planes. A result whose burn model
+        reported the regression slice by slice is drawn so, one value per row; otherwise it is the grain's one value."""
+        if self._shading is None or self._currentGrainIdx < 0 or self._regMap is None:
+            return self._mapDist, self._mapDist
+        depths = self._shading.depths(self._step, self._currentGrainIdx)
+        if depths is None:
+            return self._mapDist, self._mapDist
+        normalized = depths / (0.5 * self._currentGrain.props['diameter'].getValue())
+        z = int(np.clip(self._sliceZ, 0, self._regMap.shape[0] - 1))
+        return normalized[z], normalized[::-1, None]
+
     def _axialCoreColors(self, colors) -> 'np.ndarray | None':
         if colors is None or self._regMap is None:
             return None
@@ -508,7 +520,7 @@ class Grain3DViewerWidget(QWidget):
         if self._regMap is None:
             return
 
-        md = self._mapDist
+        axialDist, sideDist = self._mapDists()
         mx = self._maxDist
         mode = self._mode
         lut = _VIRIDIS_LUT
@@ -523,11 +535,11 @@ class Grain3DViewerWidget(QWidget):
         colors = self._coreColors()
         sideColors = self._sideCoreColors(colors)
         if axSlice is not None:
-            self._axialView.setSlice(axSlice, mode, lut, md, mx, axMask, self._axialCoreColors(colors))
+            self._axialView.setSlice(axSlice, mode, lut, axialDist, mx, axMask, self._axialCoreColors(colors))
         if corSlice is not None:
-            self._coronalView.setSlice(corSlice, mode, lut, md, mx, corMask, sideColors)
+            self._coronalView.setSlice(corSlice, mode, lut, sideDist, mx, corMask, sideColors)
         if sagSlice is not None:
-            self._sagittalView.setSlice(sagSlice, mode, lut, md, mx, sagMask, sideColors)
+            self._sagittalView.setSlice(sagSlice, mode, lut, sideDist, mx, sagMask, sideColors)
 
         self._updateLegend()
         self._updateSliceLabel()
@@ -646,7 +658,7 @@ class Grain3DViewerWidget(QWidget):
         sl = self._getAxialSlice()
         if sl is not None:
             self._axialView.setSlice(sl, self._mode, _VIRIDIS_LUT,
-                                     self._mapDist, self._maxDist,
+                                     self._mapDists()[0], self._maxDist,
                                      self._getAxialMask(), self._axialCoreColors(self._coreColors()))
             self._updateLegend()
 
@@ -654,14 +666,14 @@ class Grain3DViewerWidget(QWidget):
         sl = self._getCoronalSlice()
         if sl is not None:
             self._coronalView.setSlice(sl, self._mode, _VIRIDIS_LUT,
-                                       self._mapDist, self._maxDist,
+                                       self._mapDists()[1], self._maxDist,
                                        self._getCoronalMask(), self._sideCoreColors(self._coreColors()))
 
     def _renderSagittal(self) -> None:
         sl = self._getSagittalSlice()
         if sl is not None:
             self._sagittalView.setSlice(sl, self._mode, _VIRIDIS_LUT,
-                                        self._mapDist, self._maxDist,
+                                        self._mapDists()[1], self._maxDist,
                                         self._getSagittalMask(), self._sideCoreColors(self._coreColors()))
 
     # ------------------------------------------------------------------

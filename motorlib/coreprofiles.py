@@ -28,9 +28,11 @@ MACH = CoreMetric("machNumber", "Core Mach Number", "")
 BURN_RATE = CoreMetric("burnRate", "Burn Rate", "m/s")
 KN = CoreMetric("kn", "Kn Upstream", "")
 PORT_RATIO = CoreMetric("portRatio", "Burning Area / Port Area", "")
+EROSIVE_RATIO = CoreMetric("erosiveRatio", "Erosive Burn Rate Ratio", "")
 
 STEADY_METRICS = [PRESSURE, MASS_FLUX, MACH, BURN_RATE, KN, PORT_RATIO]
-METRICS: Dict[str, CoreMetric] = {metric.key: metric for metric in STEADY_METRICS}
+ERODING_METRICS = [PRESSURE, MASS_FLUX, MACH, BURN_RATE, EROSIVE_RATIO, KN, PORT_RATIO]
+METRICS: Dict[str, CoreMetric] = {metric.key: metric for metric in ERODING_METRICS}
 
 
 @dataclass
@@ -43,8 +45,9 @@ class CoreProfile:
 
 
 def availableMetrics(simResult) -> List[CoreMetric]:
-    """The metrics that can be shaded for this result."""
-    return list(STEADY_METRICS)
+    """The metrics that can be shaded for this result: those a model reported profiles of, or else the steady ones."""
+    reported = {key for profiles in simResult.coreProfiles if profiles for p in profiles.values() for key in p.metrics}
+    return [metric for metric in ERODING_METRICS if metric.key in reported] if reported else list(STEADY_METRICS)
 
 
 def _pointOrNone(simResult, channel, step):
@@ -53,9 +56,8 @@ def _pointOrNone(simResult, channel, step):
 
 
 def getCoreProfiles(simResult, step) -> Dict[int, CoreProfile]:
-    """Core profiles of every 3D FMM grain at recorded step `step`, keyed by grain index.
-
-    In the steady model the gas leaves the propellant at the burn rate of the chamber pressure and flows toward the nozzle,
+    """Core profiles of every 3D FMM grain still burning at recorded step `step`, keyed by grain index. A burn model that
+    followed the flow along the bore reports them itself. Otherwise they are worked out for the steady model, in which the gas leaves the propellant at the burn rate of the chamber pressure and flows toward the nozzle,
     so the mass flow past a slice is the flow arriving from the grains ahead of it plus the gas made by the part of the
     burning surface at or ahead of that slice. From it:
 
@@ -66,6 +68,9 @@ def getCoreProfiles(simResult, step) -> Dict[int, CoreProfile]:
     - pressure and burn rate: the chamber pressure and the burn rate it gives, which do not vary along the core.
     """
     motor = simResult.motor
+    reported = simResult.coreProfiles[step] if 0 <= step < len(simResult.coreProfiles) else None
+    if reported is not None:
+        return reported
     propellant = motor.propellant
     density = propellant.getProperty("density")
     regressions = _pointOrNone(simResult, "regression", step)

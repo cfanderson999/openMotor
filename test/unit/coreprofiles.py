@@ -5,7 +5,7 @@ import numpy as np
 import motorlib.grains
 import motorlib.motor
 import motorlib.propellant
-from motorlib.coreprofiles import METRICS, availableMetrics, getCoreProfiles
+from motorlib.coreprofiles import STEADY_METRICS, availableMetrics, getCoreProfiles
 from motorlib.simResult import SimulationResult
 from uilib import coreShading
 
@@ -44,7 +44,7 @@ class TestCoreProfiles(unittest.TestCase):
         for gid, profile in profiles.items():
             zdim = self.result.motor.grains[gid].regressionMap.shape[0]
             self.assertEqual(len(profile.regression), zdim)
-            self.assertEqual(set(profile.metrics), set(METRICS))
+            self.assertEqual(set(profile.metrics), {m.key for m in STEADY_METRICS})
             for values in profile.metrics.values():
                 self.assertEqual(len(values), zdim)
 
@@ -114,7 +114,7 @@ class TestCoreProfiles(unittest.TestCase):
         self.assertEqual(getCoreProfiles(self.result, len(self.result.channels['time'].getData()) + 5), {})
 
     def test_the_steady_model_offers_every_metric(self):
-        self.assertEqual([m.key for m in availableMetrics(self.result)], list(METRICS))
+        self.assertEqual([m.key for m in availableMetrics(self.result)], [m.key for m in STEADY_METRICS])
 
 
 class TestCoreShading(unittest.TestCase):

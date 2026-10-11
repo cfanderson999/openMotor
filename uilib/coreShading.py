@@ -52,6 +52,7 @@ class CoreShading:
         self.metrics: List[CoreMetric] = availableMetrics(simResult)
         self._profiles: Dict[int, Dict[int, CoreProfile]] = {}
         self._ranges: Optional[Dict[str, tuple]] = None
+        self.reported = any(profiles is not None for profiles in simResult.coreProfiles)
 
     def profiles(self, step: int) -> Dict[int, CoreProfile]:
         if step not in self._profiles:
@@ -60,6 +61,11 @@ class CoreShading:
 
     def profile(self, step: int, gid: int) -> Optional[CoreProfile]:
         return self.profiles(step).get(gid)
+
+    def depths(self, step: int, gid: int) -> Optional[np.ndarray]:
+        """How deep the core of the grain is on each slice at the step, when the model reported it slice by slice."""
+        profile = self.profile(step, gid) if self.reported else None
+        return profile.regression if profile is not None else None
 
     def range(self, key: str) -> tuple:
         """Lowest and highest value of the metric over steps spread across the burn, in every grain."""

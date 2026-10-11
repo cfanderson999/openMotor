@@ -16,6 +16,13 @@ def _headToNozzleSlices(grain) -> np.ndarray:
     return propellant[::-1]
 
 
+def grainSliceIndex(grain, end: int) -> np.ndarray:
+    """For each slice of the grain's own maps, aft end first, the slice of the burnback grid it lies on. `end` is one past
+    the last grid slice of the grain's stack, which holds the void slices of its open ends."""
+    padAft = 1 if grain.props['inhibitedEnds'].getValue() in ('Top', 'Neither') else 0
+    return end - 1 - (np.arange(grain.coreMap.shape[0]) + padAft)
+
+
 def burnbackFromFmm3dGrains(grains, advanceMethod: str = 'narrow-band', wallRing: bool = True) -> BurnbackGrid:
     """Burnback grid for set-up Fmm3DGrains stacked head end first, sharing one casting tube."""
     voxel = grains[0].props['diameter'].getValue() / grains[0].mapDim

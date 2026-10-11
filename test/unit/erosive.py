@@ -6,8 +6,10 @@ import motorlib.grains
 import motorlib.motor
 import motorlib.propellant
 from motorlib.burnmodels import ErosiveBurn, SteadyBurn
+from motorlib.coreprofiles import ERODING_METRICS, availableMetrics, getCoreProfiles
 from motorlib.grain import ConvertedGrain
 from motorlib.simResult import SimAlertLevel
+from uilib import coreShading
 
 _PROPELLANT = {
     'name': 'Test', 'density': 1700,
@@ -137,6 +139,69 @@ class TestErosiveSimulation(unittest.TestCase):
         fine = _wideBore(erosive=True, timestep=_TIMESTEP / 2).runSimulation()
         self.assertAlmostEqual(fine.getImpulse() / self.wideErosive.getImpulse(), 1, delta=0.03)
         self.assertAlmostEqual(fine.getMaxPressure() / self.wideErosive.getMaxPressure(), 1, delta=0.03)
+
+
+class TestErosiveCoreProfiles(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.result = _longBore(erosive=True).runSimulation()
+        cls.early = 3
+        cls.late = len(cls.result.channels['time'].getData()) * 2 // 3
+
+    def test_the_result_offers_the_metrics_of_the_flow_including_the_erosive_ratio(self):
+        self.assertEqual([m.key for m in availableMetrics(self.result)], [m.key for m in ERODING_METRICS])
+
+    def test_a_grain_has_a_value_for_every_slice_of_its_maps_from_the_first_step(self):
+        slices = self.result.motor.grains[0].regressionMap.shape[0]
+        for step in (0, self.early, self.late):
+            profile = getCoreProfiles(self.result, step)[0]
+            self.assertEqual(len(profile.regression), slices)
+            for key, values in profile.metrics.items():
+                self.assertEqual(len(values), slices, key)
+
+    def test_the_flow_builds_toward_the_nozzle_and_the_pressure_falls_toward_it(self):
+        metrics = getCoreProfiles(self.result, self.early)[0].metrics
+        aft, head = 0, -1
+        self.assertGreater(metrics['massFlux'][aft], 100 * metrics['massFlux'][head])
+        self.assertGreater(metrics['machNumber'][aft], metrics['machNumber'][head])
+        self.assertGreater(metrics['pressure'][head], metrics['pressure'][aft])
+
+    def test_the_gas_speeds_the_burn_most_where_it_flows_fastest(self):
+        metrics = getCoreProfiles(self.result, self.early)[0].metrics
+        self.assertGreater(metrics['erosiveRatio'][0], 0.2)
+        self.assertLess(metrics['erosiveRatio'][-1], 0.01)
+        self.assertGreater(metrics['burnRate'][0], 1.2 * metrics['burnRate'][-1])
+
+    def test_the_bore_opens_faster_where_the_burn_is_faster(self):
+        regression = getCoreProfiles(self.result, self.early)[0].regression
+        self.assertGreater(regression[0], 1.3 * regression[-1])
+
+    def test_the_peak_flux_is_the_one_the_simulation_reports(self):
+        peak = getCoreProfiles(self.result, self.early)[0].metrics['massFlux'].max()
+        reported = self.result.channels['massFlux'].getPoint(self.early)[0]
+        self.assertAlmostEqual(peak / reported, 1, delta=0.02)
+
+    def test_the_kn_upstream_of_the_nozzle_end_is_the_motors_kn(self):
+        for step in (0, self.early, self.late):
+            kn = getCoreProfiles(self.result, step)[0].metrics['kn'][0]
+            self.assertAlmostEqual(kn / self.result.channels['kn'].getPoint(step), 1, delta=0.03)
+
+    def test_the_start_is_the_steady_flow_without_erosion(self):
+        metrics = getCoreProfiles(self.result, 0)[0].metrics
+        self.assertTrue(np.all(metrics['erosiveRatio'] == 0))
+        self.assertTrue(np.all(metrics['pressure'] == metrics['pressure'][0]))
+        self.assertTrue(np.all(np.diff(metrics['massFlux']) <= 1e-9))
+
+    def test_the_views_draw_the_core_at_the_depth_of_each_slice_only_for_a_result_that_reports_it(self):
+        shading = coreShading.CoreShading(self.result)
+        np.testing.assert_array_equal(shading.depths(self.early, 0), getCoreProfiles(self.result, self.early)[0].regression)
+        steady = coreShading.CoreShading(_wideBore(erosive=False, convert=True).runSimulation())
+        self.assertIsNone(steady.depths(1, 0))
+
+    def test_a_normal_simulation_reports_no_profiles_of_its_own(self):
+        result = _wideBore(erosive=False, convert=True).runSimulation()
+        self.assertEqual(result.coreProfiles, [None] * len(result.channels['time'].getData()))
+        self.assertEqual(len(availableMetrics(result)), 6)
 
 
 class TestErosiveErrors(unittest.TestCase):

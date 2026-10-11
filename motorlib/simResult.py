@@ -132,6 +132,10 @@ class SimulationResult:
         self.alerts: List[SimAlert] = []
         self.success = False
 
+        # Per recorded step, the profiles along the core that the burn model reported ({grain index: CoreProfile}), or
+        # None for a step where it reported none.
+        self.coreProfiles = []
+
         self.channels = {
             "time": LogChannel("Time", float, "s"),
             "kn": LogChannel("Kn", float, ""),
