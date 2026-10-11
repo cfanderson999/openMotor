@@ -63,8 +63,9 @@ class SliceViewWidget(QWidget):
     # ------------------------------------------------------------------
 
     def setSlice(self, arr: np.ndarray, mode: str, lut: np.ndarray,
-                 mapDist: float, maxDist: float,
-                 mask: 'np.ndarray | None' = None) -> None:
+                 mapDist: 'float | np.ndarray', maxDist: float,
+                 mask: 'np.ndarray | None' = None,
+                 coreColors: 'np.ndarray | None' = None) -> None:
         """Render a new 2-D slice.
 
         Parameters
@@ -75,6 +76,9 @@ class SliceViewWidget(QWidget):
         mapDist  : normalised regression distance at current burn step
         maxDist  : max value in the full regression map (for heatmap scaling)
         mask     : (rows, cols) bool, True = outside grain boundary (masked out)
+        coreColors : (rows, cols, 4) uint8, optional. Colours for the burned core, which replace the usual look of the
+                   core. `mapDist` may then be an array that broadcasts against `arr`, such as one value per row, so
+                   that each slice of the grain can be drawn at its own regression.
         """
         if arr is None or arr.size == 0:
             self._pixmap = None
@@ -87,9 +91,9 @@ class SliceViewWidget(QWidget):
         self._srcW = w
 
         if mode == 'binary':
-            rgba = _renderBinary(arr, mapDist, mask)
+            rgba = _renderBinary(arr, mapDist, mask, coreColors)
         else:
-            rgba = _renderHeatmap(arr, lut, maxDist, mask)
+            rgba = _applyCore(_renderHeatmap(arr, lut, maxDist, mask), arr, mapDist, mask, coreColors)
 
         # Keep buffer alive – QImage borrows the memory
         self._imgBuf = np.ascontiguousarray(rgba)
@@ -211,8 +215,21 @@ class SliceViewWidget(QWidget):
 # Pure-function rendering helpers (module-level for easy testing)
 # ------------------------------------------------------------------
 
-def _renderBinary(arr: np.ndarray, mapDist: float,
-                  mask: 'np.ndarray | None' = None) -> np.ndarray:
+def _applyCore(rgba: np.ndarray, arr: np.ndarray, mapDist: 'float | np.ndarray',
+               mask: 'np.ndarray | None', coreColors: 'np.ndarray | None') -> np.ndarray:
+    """Paint `coreColors` over the burned core of an image, leaving what is outside the grain boundary transparent."""
+    if coreColors is None:
+        return rgba
+    core = arr <= mapDist
+    rgba[core] = coreColors[core]
+    if mask is not None:
+        rgba[mask] = (0, 0, 0, 0)
+    return rgba
+
+
+def _renderBinary(arr: np.ndarray, mapDist: 'float | np.ndarray',
+                  mask: 'np.ndarray | None' = None,
+                  coreColors: 'np.ndarray | None' = None) -> np.ndarray:
     """Return (h, w, 4) RGBA: propellant=grey, core/burned=black.
 
     Masked-out voxels (outside grain boundary) are rendered transparent
@@ -233,7 +250,7 @@ def _renderBinary(arr: np.ndarray, mapDist: float,
     rgba[:, :, 3] = 255
     if mask is not None:
         rgba[mask] = (0, 0, 0, 0)  # outside boundary → transparent
-    return rgba
+    return _applyCore(rgba, arr, mapDist, mask, coreColors)
 
 
 def _renderHeatmap(arr: np.ndarray, lut: np.ndarray, maxDist: float,

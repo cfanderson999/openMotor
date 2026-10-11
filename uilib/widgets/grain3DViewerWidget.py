@@ -10,10 +10,14 @@ Layout (2×2 grid)
   │  XY plane   │  XZ plane   │
   │  (z slice)  │  (y slice)  │
   ├─────────────┼─────────────┤
-  │  Sagittal   │  (future    │
-  │  YZ plane   │   3-D view) │
+  │  Sagittal   │  Core       │
+  │  YZ plane   │  legend     │
   │  (x slice)  │             │
   └─────────────┴─────────────┘
+
+The Core menu shades the burned core of the grain by a quantity from the simulation (pressure, mass flux, Mach number,
+...), one colour per slice of the grain, on a colour range fixed over the whole burn. The legend shows the range and the
+value at the slice the crosshair is on.
 
 Crosshair interaction
 ---------------------
@@ -57,7 +61,10 @@ from PyQt6.QtCore import Qt, QTimer
 
 from motorlib.grain import Fmm3DGrain
 
+from uilib import coreShading
+
 from .sliceViewWidget import SliceViewWidget
+from .coreLegendWidget import CoreLegendWidget
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +88,6 @@ _VIRIDIS_LUT: np.ndarray = _buildLut('viridis')
 _AXIAL_TITLE    = 'Axial (XY) — Z slice'
 _CORONAL_TITLE  = 'Coronal (XZ) — Y slice'
 _SAGITTAL_TITLE = 'Sagittal (YZ) — X slice'
-_PLACEHOLDER_TITLE = '3-D View (coming soon)'
 
 
 class Grain3DViewerWidget(QWidget):
@@ -124,6 +130,12 @@ class Grain3DViewerWidget(QWidget):
         # Display mode
         self._mode: str = 'binary'  # 'binary' or 'heatmap'
 
+        # Core shading: the metric key shown (None for none), the result's profiles, and the recorded step shown
+        self._coreKey: 'str | None' = None
+        self._shading: 'coreShading.CoreShading | None' = None
+        self._step: int = 0
+        self._preferences = None
+
         # True when showing t=0 geometry before a full simulation has been run
         self._previewMode: bool = False
 
@@ -163,6 +175,12 @@ class Grain3DViewerWidget(QWidget):
         self._modeCombo.currentIndexChanged.connect(self._onModeChanged)
         ctrlBar.addWidget(self._modeCombo)
 
+        ctrlBar.addWidget(QLabel('Core:'))
+        self._coreCombo = QComboBox()
+        self._coreCombo.setMinimumWidth(140)
+        self._coreCombo.currentIndexChanged.connect(self._onCoreMetricChanged)
+        ctrlBar.addWidget(self._coreCombo)
+
         self._sliceLabel = QLabel('slice: —')
         ctrlBar.addWidget(self._sliceLabel)
 
@@ -180,7 +198,8 @@ class Grain3DViewerWidget(QWidget):
         grid.addWidget(self._wrapView(self._axialView,    _AXIAL_TITLE),    0, 0)
         grid.addWidget(self._wrapView(self._coronalView,  _CORONAL_TITLE),  0, 1)
         grid.addWidget(self._wrapView(self._sagittalView, _SAGITTAL_TITLE), 1, 0)
-        grid.addWidget(self._makePlaceholder(),                              1, 1)
+        self._legend = CoreLegendWidget()
+        grid.addWidget(self._legend,                                         1, 1)
 
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
@@ -235,17 +254,6 @@ class Grain3DViewerWidget(QWidget):
         vbox.addWidget(view, stretch=1)
         return frame
 
-    @staticmethod
-    def _makePlaceholder() -> QFrame:
-        frame = QFrame()
-        frame.setFrameShape(QFrame.Shape.StyledPanel)
-        vbox = QVBoxLayout(frame)
-        lbl = QLabel(_PLACEHOLDER_TITLE)
-        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lbl.setStyleSheet('color: gray; font-size: 11px;')
-        vbox.addWidget(lbl)
-        return frame
-
     def _showPlaceholderMessage(self, msg: str = 'No 3-D grains in this motor'):
         for v in (self._axialView, self._coronalView, self._sagittalView):
             v.setSlice(None, self._mode, _VIRIDIS_LUT, 0.0, 1.0)
@@ -254,6 +262,11 @@ class Grain3DViewerWidget(QWidget):
     # ------------------------------------------------------------------
     # Public API – called by ResultsWidget
     # ------------------------------------------------------------------
+
+    def setPreferences(self, preferences) -> None:
+        """The preferences that choose the units the legend shows."""
+        self._preferences = preferences
+        self._legend.setPreferences(preferences)
 
     def showPreview(self, motor) -> None:
         """Show the grain at t=0 after quick results are ready, before a full simulation.
@@ -277,6 +290,8 @@ class Grain3DViewerWidget(QWidget):
         self._previewMode = False
         self._timeSlider.setEnabled(True)
         self._simResult = simResult
+        self._step = 0
+        self._loadCoreMetrics(simResult)
         self._3dGrains = [
             (i, g)
             for i, g in enumerate(simResult.motor.grains)
@@ -320,6 +335,7 @@ class Grain3DViewerWidget(QWidget):
         regDist = simResult.channels['regression'].getPoint(sliderIndex)[gid]
         diameter = self._currentGrain.props['diameter'].getValue()
         self._mapDist = regDist / (0.5 * diameter)
+        self._step = sliderIndex
 
         # Sync local slider without re-triggering
         self._timeSlider.blockSignals(True)
@@ -342,6 +358,9 @@ class Grain3DViewerWidget(QWidget):
         self._regMapContiguous = None
         self._mask = None
         self._mapDist = 0.0
+        self._step = 0
+        self._shading = None
+        self._loadCoreMetrics(None)
         self._previewMode = False
         self._grainCombo.blockSignals(True)
         self._grainCombo.clear()
@@ -386,6 +405,53 @@ class Grain3DViewerWidget(QWidget):
 
         self._syncCrosshairs()
         self._renderAll()
+
+    # ------------------------------------------------------------------
+    # Core shading
+    # ------------------------------------------------------------------
+
+    def _loadCoreMetrics(self, simResult) -> None:
+        """Offer the metrics the result can shade, keeping the chosen one when it is still on offer."""
+        self._shading = coreShading.CoreShading(simResult) if simResult is not None else None
+        keep = self._coreKey
+        self._coreCombo.blockSignals(True)
+        self._coreCombo.clear()
+        self._coreCombo.addItem('None', userData=None)
+        for metric in (self._shading.metrics if self._shading is not None else []):
+            self._coreCombo.addItem(metric.name, userData=metric)
+        keys = [self._coreCombo.itemData(i) for i in range(self._coreCombo.count())]
+        index = next((i for i, m in enumerate(keys) if m is not None and m.key == keep), 0)
+        self._coreCombo.setCurrentIndex(index)
+        self._coreCombo.blockSignals(False)
+        self._coreKey = keys[index].key if keys[index] is not None else None
+
+    def _coreColors(self) -> 'np.ndarray | None':
+        """Per-slice colours of the chosen metric for the grain and step on show, or None to draw the plain core."""
+        if self._coreKey is None or self._shading is None or self._currentGrainIdx < 0:
+            return None
+        return self._shading.colors(self._coreKey, self._step, self._currentGrainIdx)
+
+    def _updateLegend(self) -> None:
+        metric = self._coreCombo.currentData()
+        if metric is None or self._shading is None:
+            self._legend.clear()
+            return
+        self._legend.setMetric(metric.name, metric.unit, *self._shading.range(metric.key), coreShading.CORE_LUT)
+        profile = self._shading.profile(self._step, self._currentGrainIdx)
+        sliceZ = int(np.clip(self._sliceZ, 0, self._regMap.shape[0] - 1)) if self._regMap is not None else 0
+        value = profile.metrics[metric.key][sliceZ] if profile is not None else float('nan')
+        self._legend.setReadout('At crosshair (slice {})'.format(sliceZ), value)
+
+    def _axialCoreColors(self, colors) -> 'np.ndarray | None':
+        if colors is None or self._regMap is None:
+            return None
+        z = int(np.clip(self._sliceZ, 0, self._regMap.shape[0] - 1))
+        return coreShading.axialImage(colors, z, self._regMap.shape[1:])
+
+    def _sideCoreColors(self, colors) -> 'np.ndarray | None':
+        if colors is None or self._regMap is None:
+            return None
+        return coreShading.sideImage(colors, self._regMap.shape[1])
 
     # ------------------------------------------------------------------
     # Slice extraction
@@ -454,13 +520,16 @@ class Grain3DViewerWidget(QWidget):
         corMask  = self._getCoronalMask()
         sagMask  = self._getSagittalMask()
 
+        colors = self._coreColors()
+        sideColors = self._sideCoreColors(colors)
         if axSlice is not None:
-            self._axialView.setSlice(axSlice, mode, lut, md, mx, axMask)
+            self._axialView.setSlice(axSlice, mode, lut, md, mx, axMask, self._axialCoreColors(colors))
         if corSlice is not None:
-            self._coronalView.setSlice(corSlice, mode, lut, md, mx, corMask)
+            self._coronalView.setSlice(corSlice, mode, lut, md, mx, corMask, sideColors)
         if sagSlice is not None:
-            self._sagittalView.setSlice(sagSlice, mode, lut, md, mx, sagMask)
+            self._sagittalView.setSlice(sagSlice, mode, lut, md, mx, sagMask, sideColors)
 
+        self._updateLegend()
         self._updateSliceLabel()
 
     def _updateSliceLabel(self) -> None:
@@ -578,21 +647,22 @@ class Grain3DViewerWidget(QWidget):
         if sl is not None:
             self._axialView.setSlice(sl, self._mode, _VIRIDIS_LUT,
                                      self._mapDist, self._maxDist,
-                                     self._getAxialMask())
+                                     self._getAxialMask(), self._axialCoreColors(self._coreColors()))
+            self._updateLegend()
 
     def _renderCoronal(self) -> None:
         sl = self._getCoronalSlice()
         if sl is not None:
             self._coronalView.setSlice(sl, self._mode, _VIRIDIS_LUT,
                                        self._mapDist, self._maxDist,
-                                       self._getCoronalMask())
+                                       self._getCoronalMask(), self._sideCoreColors(self._coreColors()))
 
     def _renderSagittal(self) -> None:
         sl = self._getSagittalSlice()
         if sl is not None:
             self._sagittalView.setSlice(sl, self._mode, _VIRIDIS_LUT,
                                         self._mapDist, self._maxDist,
-                                        self._getSagittalMask())
+                                        self._getSagittalMask(), self._sideCoreColors(self._coreColors()))
 
     # ------------------------------------------------------------------
     # Control signal handlers
@@ -600,6 +670,11 @@ class Grain3DViewerWidget(QWidget):
 
     def _onGrainSelected(self, index: int) -> None:
         self._loadGrain(index)
+
+    def _onCoreMetricChanged(self, index: int) -> None:
+        metric = self._coreCombo.itemData(index)
+        self._coreKey = metric.key if metric is not None else None
+        self._renderAll()
 
     def _onModeChanged(self, index: int) -> None:
         self._mode = 'heatmap' if index == 1 else 'binary'

@@ -935,6 +935,18 @@ class Fmm3DGrain(Grain):
         usable = coreArea > 0
         return float((massFlow[usable] / coreArea[usable]).max()) if usable.any() else 0.0
 
+    def getCoreProfile(self, regDist):
+        """The core of the grain after `regDist` of regression, slice by slice from the aft end of the regression map:
+        the port area [m^2] and the burning area [m^2] at or ahead of the slice, which is the part of the surface whose gas
+        has passed the slice on its way to the nozzle. Returns None when the layer areas that place the burning surface
+        are not available, as when the grain has burned out."""
+        mapDist = self.normalize(regDist)
+        fractions = self._getAreaFractionFore(mapDist)
+        if fractions is None or not _hasFmm3dCy:
+            return None
+        counts = self._getCoreCounts(mapDist, 0, self.regressionMap.shape[0] - 1)
+        return self.mapToArea(counts.astype(float)), fractions * self.getSurfaceAreaAtRegression(regDist)
+
     def _getMeshedPeakSearchCandidates(self, startPos, endPos, massIn, dTime, regDist, dRegDist, density):
         """Return candidate z-positions for peak-flux search in meshed 3D mode.
 
