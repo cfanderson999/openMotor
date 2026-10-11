@@ -58,6 +58,7 @@ class ResultsWidget(QWidget):
     def setPreferences(self, pref):
         self.preferences = pref
         self.ui.widgetGraph.setPreferences(pref)
+        self._viewer3D.setPreferences(pref)
 
     def setupGrainChecks(self, numGrains, restoreCachedChecks):
         self.ui.grainSelector.resetChecks()
