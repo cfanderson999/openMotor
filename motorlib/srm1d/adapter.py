@@ -3,8 +3,9 @@ import numpy as np
 from .burnback import BurnbackGrid
 
 
-def burnbackFromFmm3dGrain(grain) -> BurnbackGrid:
-    """Burnback grid for a set-up Fmm3DGrain. The axial axis is flipped so the nozzle (aft, index 0) ends up last."""
+def _headToNozzleSlices(grain) -> np.ndarray:
+    """Propellant mask of a set-up Fmm3DGrain with open ends padded by a void slice. Axial order runs from the head end
+    to the nozzle, the reverse of the grain's own aft-first axis."""
     propellant = np.asarray(grain.coreMap, dtype=bool)
     ends = grain.props['inhibitedEnds'].getValue()
     voidSlice = np.zeros((1,) + propellant.shape[1:], dtype=bool)
@@ -12,9 +13,20 @@ def burnbackFromFmm3dGrain(grain) -> BurnbackGrid:
         propellant = np.concatenate([voidSlice, propellant], axis=0)
     if ends in ('Bottom', 'Neither'):
         propellant = np.concatenate([propellant, voidSlice], axis=0)
+    return propellant[::-1]
 
-    ny, nx = propellant.shape[1:]
-    yy, xx = np.meshgrid(np.linspace(-1, 1, ny), np.linspace(-1, 1, nx), indexing='ij')
-    valid = xx ** 2 + yy ** 2 <= 1.0
-    voxel = grain.props['diameter'].getValue() / grain.mapDim
-    return BurnbackGrid.fromMask(propellant[::-1], valid, voxel)
+
+def burnbackFromFmm3dGrains(grains, advanceMethod: str = 'narrow-band', wallRing: bool = True) -> BurnbackGrid:
+    """Burnback grid for set-up Fmm3DGrains stacked head end first, sharing one casting tube."""
+    voxel = grains[0].props['diameter'].getValue() / grains[0].mapDim
+    valid = ~np.asarray(grains[0].mask[0], dtype=bool)
+    for grain in grains[1:]:
+        sameTube = np.array_equal(~np.asarray(grain.mask[0], dtype=bool), valid)
+        if not sameTube or not np.isclose(grain.props['diameter'].getValue() / grain.mapDim, voxel):
+            raise ValueError("stacked grains must share diameter, map dimension and casting mask")
+    return BurnbackGrid.fromMask(np.concatenate([_headToNozzleSlices(g) for g in grains], axis=0), valid, voxel, advanceMethod, wallRing)
+
+
+def burnbackFromFmm3dGrain(grain, advanceMethod: str = 'narrow-band', wallRing: bool = True) -> BurnbackGrid:
+    """Burnback grid for a single set-up Fmm3DGrain. The nozzle (aft, index 0) ends up last."""
+    return burnbackFromFmm3dGrains([grain], advanceMethod, wallRing)

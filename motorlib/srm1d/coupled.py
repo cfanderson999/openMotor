@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .core import FlowProperties, advanceFlow
+from .quasisteady import advanceQuasiSteady
 
 
 # Largest values in the strand-burner data of Ma et al. (2020), test/data/ma2020_experimental.json. Mass flux is a rough
@@ -24,6 +25,9 @@ class BurnResult:
     burnArea: list = field(default_factory=list)
     pressureProfile: list = field(default_factory=list)
     erosiveRatioProfile: list = field(default_factory=list)
+    machProfile: list = field(default_factory=list)
+    snapshots: list = field(default_factory=list)
+    crossSectionValid: np.ndarray = None
     peakVelocity: list = field(default_factory=list)
     peakMassFlux: list = field(default_factory=list)
 
@@ -70,14 +74,22 @@ def _seedSteadyState(aPort, dHyd, burnLength, dx, aThroat, props, pAmbient, pres
 def runBurn(geometry, props: FlowProperties, throatDiameter, pAmbient=101325.0, tMax=60.0, pCutoff=0.5e6,
             erosive=True, maxStepFraction=0.75, startupSpan=5e-4, cfl=0.5, dtMax=1e-4,
             burnUpdateInterval=10, flowStride=1, steadyStart=True, maxSpan=0.05,
-            minSpan=2.5e-4, pressureStep=0.03) -> BurnResult:
+            minSpan=2.5e-4, pressureStep=0.03, throatErosionCoeff=0.0, snapshotInterval=0.0, flow='quasi-steady',
+            quasiSteadyStep=1e-3, quasiSteadyLagFraction=0.25) -> BurnResult:
+    """`flow` is 'quasi-steady' for the steady bore flow with chamber storage, which takes substeps of at most
+    `quasiSteadyStep` seconds and `quasiSteadyLagFraction` of the shortest burn rate lag, or 'transient' for the acoustic
+    PISO solver, which follows the pressure waves and takes microsecond steps."""
+    if flow not in ('transient', 'quasi-steady'):
+        raise ValueError(f"flow must be 'transient' or 'quasi-steady', got {flow!r}")
     if geometry.nSlabs % flowStride:
         raise ValueError(f"flowStride {flowStride} must divide the {geometry.nSlabs} slabs")
     n = geometry.nSlabs // flowStride
     dx = geometry.voxel * flowStride
     x = geometry.slabCenters.reshape(n, flowStride).mean(axis=1)
     aThroat = np.pi / 4 * throatDiameter ** 2
+    throat = throatDiameter
     tAmbient = props.tInitial
+    surfaceTables = props.surfaceTables()
 
     pressure = np.full(n, pAmbient)
     temperature = np.full(n, tAmbient)
@@ -86,29 +98,37 @@ def runBurn(geometry, props: FlowProperties, throatDiameter, pAmbient=101325.0, 
     if steadyStart:
         _seedSteadyState(*_groupGeometry(*geometry.flowGeometry(), flowStride), dx, aThroat, props, pAmbient,
                          pressure, temperature, density, velocity)
+    flux = np.zeros(n + 1)
     work = {k: np.zeros(n) for k in ('rTotal', 'rErosive', 'rIntegral', 'fDarcy', 'Re', 'Mach', 'uCell', 'rDyn', 'rQs', 'rQsErosive')}
 
     result = BurnResult()
+    nextSnapshot = 0.0
+    if snapshotInterval > 0.0:
+        midRow = geometry.phi.shape[1] // 2
+        result.crossSectionValid = geometry.valid[0, midRow].copy()
     t = 0.0
     span = startupSpan
     burning = True
     peak = 0.0
     previousHead = pressure[0]
     while t < tMax:
+        aThroat = np.pi / 4 * throat ** 2
         aPort, dHyd, burnLength = _groupGeometry(*geometry.flowGeometry(), flowStride)
         burning = bool(burnLength.sum() > 0.0)
         work['rIntegral'][:] = 0.0
-        elapsed, massNozzle, _ = advanceFlow(
-            density, velocity, pressure, temperature, aPort, dHyd, burnLength, x,
-            work['rTotal'], work['rErosive'], work['rIntegral'], work['fDarcy'], work['Re'], work['Mach'], work['uCell'],
-            dx, n, aThroat, pAmbient, tAmbient,
-            props.rhoPropellant, props.cpPropellant, props.tSurface, props.tInitial, props.tFlame,
-            props.cpGas, props.muGas, props.kGas, props.prandtl, props.gamma, props.rSpecific,
-            props.roughness, props.kappa, props.tabMinP, props.tabMaxP, props.tabA, props.tabN, len(props.tabA),
-            erosive, cfl, dtMax, burnUpdateInterval, 0.0, span, 100_000_000,
-            work['rDyn'], work['rQs'], work['rQsErosive'], props.solidDiffusivity, props.kappaZn,
-        )
+        common = (density, velocity, pressure, temperature, aPort, dHyd, burnLength, x,
+                  work['rTotal'], work['rErosive'], work['rIntegral'], work['fDarcy'], work['Re'], work['Mach'], work['uCell'],
+                  dx, n, aThroat, pAmbient, tAmbient,
+                  props.rhoPropellant, props.tInitial, props.tFlame,
+                  props.cpGas, props.muGas, props.kGas, props.prandtl, props.gamma, props.rSpecific,
+                  props.roughness, props.kappa, props.tabMinP, props.tabMaxP, props.tabA, props.tabN, len(props.tabA))
+        burnState = (work['rDyn'], work['rQs'], work['rQsErosive'], props.solidDiffusivity, props.kappaZn, *surfaceTables)
+        if flow == 'quasi-steady':
+            elapsed, massNozzle, _ = advanceQuasiSteady(*common, erosive, quasiSteadyStep, quasiSteadyLagFraction, span, *burnState, flux)
+        else:
+            elapsed, massNozzle, _ = advanceFlow(*common, erosive, cfl, dtMax, burnUpdateInterval, 0.0, span, 100_000_000, *burnState)
         t += elapsed
+        throat += 2.0 * throatErosionCoeff * pressure[0] * elapsed
         rAverage = work['rIntegral'] / elapsed
         if burning:
             geometry.advance(np.interp(geometry.slabCenters, x, rAverage), elapsed)
@@ -120,6 +140,11 @@ def runBurn(geometry, props: FlowProperties, throatDiameter, pAmbient=101325.0, 
         result.burnArea.append(float(burnLength.sum() * dx))
         result.pressureProfile.append(pressure.copy())
         result.erosiveRatioProfile.append(work['rErosive'] / np.maximum(work['rTotal'] - work['rErosive'], 1e-12))
+        result.machProfile.append(np.abs(work['Mach']).copy())
+        if snapshotInterval > 0.0 and t >= nextSnapshot:
+            result.snapshots.append({'time': t, 'section': geometry.phi[:, midRow].astype(np.float32), 'mach': np.abs(work['Mach']).copy(),
+                                     'pressure': pressure.copy()})
+            nextSnapshot += snapshotInterval
         result.peakVelocity.append(float(np.abs(work['uCell']).max()))
         result.peakMassFlux.append(float((density * np.abs(work['uCell'])).max()))
         if not burning and pressure[0] < pCutoff:

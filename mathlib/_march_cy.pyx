@@ -254,3 +254,102 @@ def mc_surface_area_by_layer(
         layer[iz] = _layer_area(grid, valid_mask, level, iz, ny, nx, tri_t, edz0, edy0, edx0, edz1, edy1, edx1, z_scale)
 
     return out
+
+
+cdef inline double _cell_contour_length(double v00, double v01, double v10, double v11) nogil:
+    """Marching squares contour length inside one pixel cell, in pixel units. Corner v10 is one row after v00.
+
+    An ambiguous saddle separates the high corners, the same choice as skimage's find_contours with low connectivity."""
+    cdef bint h00 = v00 >= 0.0
+    cdef bint h01 = v01 >= 0.0
+    cdef bint h10 = v10 >= 0.0
+    cdef bint h11 = v11 >= 0.0
+    cdef int high = h00 + h01 + h10 + h11
+    if high == 0 or high == 4:
+        return 0.0
+    # Crossing points on the top, right, bottom and left edges, as (column, row) inside the cell.
+    cdef double px[4]
+    cdef double py[4]
+    cdef int edge[4]
+    cdef int n = 0
+    if h00 != h01:
+        px[0] = v00 / (v00 - v01)
+        py[0] = 0.0
+        edge[n] = 0
+        n += 1
+    if h01 != h11:
+        px[1] = 1.0
+        py[1] = v01 / (v01 - v11)
+        edge[n] = 1
+        n += 1
+    if h10 != h11:
+        px[2] = v10 / (v10 - v11)
+        py[2] = 1.0
+        edge[n] = 2
+        n += 1
+    if h00 != h10:
+        px[3] = 0.0
+        py[3] = v00 / (v00 - v10)
+        edge[n] = 3
+        n += 1
+    cdef int a, b
+    if n == 2:
+        a = edge[0]
+        b = edge[1]
+        return sqrt((px[a] - px[b]) * (px[a] - px[b]) + (py[a] - py[b]) * (py[a] - py[b]))
+    # Saddle: all four edges cross.
+    cdef int a1, b1, a2, b2
+    if h00:
+        a1, b1, a2, b2 = 0, 3, 2, 1
+    else:
+        a1, b1, a2, b2 = 0, 1, 2, 3
+    return (sqrt((px[a1] - px[b1]) * (px[a1] - px[b1]) + (py[a1] - py[b1]) * (py[a1] - py[b1]))
+            + sqrt((px[a2] - px[b2]) * (px[a2] - px[b2]) + (py[a2] - py[b2]) * (py[a2] - py[b2])))
+
+
+cdef double _slice_contour_length(cnp.float64_t[:, :, ::1] grid, double level, int iz, int ny, int nx) nogil:
+    cdef double acc = 0.0
+    cdef int iy, ix
+    for iy in range(ny - 1):
+        for ix in range(nx - 1):
+            acc += _cell_contour_length(
+                grid[iz, iy, ix] - level, grid[iz, iy, ix + 1] - level,
+                grid[iz, iy + 1, ix] - level, grid[iz, iy + 1, ix + 1] - level,
+            )
+    return acc
+
+
+def contour_length_by_slice(cnp.float64_t[:, :, ::1] grid not None, double level = 0.0):
+    """Length of the `level` contour of each z-slice, in pixel units; returns an (nz,) array."""
+    cdef int nz = grid.shape[0]
+    cdef int ny = grid.shape[1]
+    cdef int nx = grid.shape[2]
+    out = np.zeros(nz, dtype=np.float64)
+    cdef double[::1] length = out
+    cdef int iz
+    for iz in prange(nz, nogil=True, schedule='static'):
+        length[iz] = _slice_contour_length(grid, level, iz, ny, nx)
+    return out
+
+
+def extend_into_mask(cnp.float64_t[:, :, ::1] grid not None, cnp.int64_t[::1] masked not None,
+                     cnp.int64_t[::1] source not None):
+    """Copy of `grid` in which the in-slice flat positions `masked[k]` take the value at `source[k]` on every slice."""
+    cdef Py_ssize_t nz = grid.shape[0]
+    cdef Py_ssize_t ny = grid.shape[1]
+    cdef Py_ssize_t nx = grid.shape[2]
+    cdef Py_ssize_t count = masked.shape[0]
+    out = np.empty((nz, ny, nx), dtype=np.float64)
+    cdef cnp.float64_t[:, :, ::1] o = out
+    cdef Py_ssize_t iz, k, iy, ix, sy, sx
+    for iz in prange(nz, nogil=True, schedule='static'):
+        for iy in range(ny):
+            for ix in range(nx):
+                o[iz, iy, ix] = grid[iz, iy, ix]
+        for k in range(count):
+            iy = masked[k] // nx
+            ix = masked[k] % nx
+            sy = source[k] // nx
+            sx = source[k] % nx
+            o[iz, iy, ix] = grid[iz, sy, sx]
+    return out

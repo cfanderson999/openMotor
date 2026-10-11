@@ -108,3 +108,37 @@ class TestMarchingAreaPixels(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestContourLengthBySlice(unittest.TestCase):
+    """The marching squares kernel must reproduce skimage's contour lengths, saddles included."""
+
+    @staticmethod
+    def _skimageLength(plane, level=0.0):
+        from skimage import measure
+        if not plane.min() < level < plane.max():
+            return 0.0
+        return sum(np.hypot(*np.diff(c, axis=0).T).sum() for c in measure.find_contours(plane, level))
+
+    def testCircleLengthMatchesCircumference(self):
+        from mathlib._march import contour_length_by_slice
+        y, x = np.indices((1, 200, 200))
+        field = np.hypot(y * 0 + 99.5 - np.indices((1, 200, 200))[1], 99.5 - x) - 60.0
+        length = contour_length_by_slice(field, 0.0)[0]
+        self.assertAlmostEqual(length / (2 * np.pi * 60.0), 1.0, delta=2e-3)
+
+    def testMatchesSkimageOnNoiseWithSaddles(self):
+        from mathlib._march import contour_length_by_slice
+        field = np.random.default_rng(3).normal(size=(5, 30, 30))
+        expected = np.array([self._skimageLength(plane) for plane in field])
+        np.testing.assert_allclose(contour_length_by_slice(field, 0.0), expected, rtol=1e-12)
+
+    def testLevelShiftsTheContour(self):
+        from mathlib._march import contour_length_by_slice
+        field = np.random.default_rng(4).normal(size=(3, 24, 24))
+        expected = np.array([self._skimageLength(plane, 0.5) for plane in field])
+        np.testing.assert_allclose(contour_length_by_slice(field, 0.5), expected, rtol=1e-12)
+
+    def testSliceWithoutSurfaceHasZeroLength(self):
+        from mathlib._march import contour_length_by_slice
+        self.assertEqual(float(contour_length_by_slice(np.ones((2, 8, 8)), 0.0).sum()), 0.0)

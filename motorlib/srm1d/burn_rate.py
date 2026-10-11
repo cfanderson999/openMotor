@@ -340,15 +340,45 @@ def saint_robert_from_tabs(P, tab_min_p, tab_max_p, tab_a, tab_n, n_tabs):
 
 
 @njit(cache=True, fastmath=True)
+def surface_temperature(rate, ts_ln_rate, ts_values):
+    """Surface temperature [K] at burn rate `rate` [m/s], interpolated linearly in ln(rate) from a table."""
+    return np.interp(np.log(rate), ts_ln_rate, ts_values)
+
+
+@njit(cache=True, fastmath=True)
+def erosive_energy_factor(rate, T_flame, rho_p, ts_ln_rate, ts_values, h_values):
+    """Erosive gain (T_f - T_s)/(ρ_p H) of Ma et al., with T_s and the surface energy H evaluated at the burn rate."""
+    T_s = surface_temperature(rate, ts_ln_rate, ts_values)
+    H = np.interp(np.log(rate), ts_ln_rate, h_values)
+    return max(T_flame - T_s, 0.0) / (rho_p * H)
+
+
+@njit(cache=True, fastmath=True)
+def _erosive_residual(r, r0, alpha, h0, T_flame, rho_p, ts_ln_rate, ts_values, h_values):
+    """F(r) = r - r0 - ebf(r) h(r), whose root is the total burn rate; one log and one table search per call."""
+    beta = alpha * r
+    if beta < 1e-6:
+        h = h0 * (1.0 - beta / 2.0)
+    elif beta > 500.0:
+        h = 0.0
+    else:
+        h = h0 * beta / (np.exp(beta) - 1.0)
+    ln_r = np.log(r)
+    T_s = np.interp(ln_r, ts_ln_rate, ts_values)
+    H = np.interp(ln_r, ts_ln_rate, h_values)
+    return r - r0 - max(T_flame - T_s, 0.0) / (rho_p * H) * h
+
+
+@njit(cache=True, fastmath=True)
 def burn_rate_cell(
     P, Re_local, D_hyd, x_from_head, roughness,
-    Pr, k_thermal, Cp_gas, T_flame, T_surface,
-    rho_p, Cps, T_initial,
+    Pr, k_thermal, Cp_gas, T_flame,
+    rho_p, T_initial,
     tab_min_p, tab_max_p, tab_a, tab_n, n_tabs,
-    kappa,
+    kappa, ts_ln_rate, ts_values, h_values, r_guess,
 ):
     """
-    Compute total burn rate at a single cell using bisection.
+    Compute total burn rate at a single cell by bracketed root finding.
 
     This solves the implicit equation for the total burn rate r:
 
@@ -357,24 +387,19 @@ def burn_rate_cell(
     where h(r) = h₀ · β/(exp(β)-1) depends on r through the blowing
     parameter β = ρ_p · r · C_p / h₀.
 
-    WHY BISECTION (not fixed-point iteration):
+    WHY A BRACKETED ROOT FIND (not fixed-point iteration):
         The fixed-point iteration r_{n+1} = f(r_n) has a Jacobian
         df/dr that depends on the transpiration correction slope. When
         erosion is moderate to strong (erosion ratio > ~1.5), the
-        Jacobian exceeds 1 and fixed-point iteration diverges. This was
-        discovered empirically during development and confirmed by
-        computing df/dr analytically.
+        Jacobian exceeds 1 and fixed-point iteration diverges.
 
-        Bisection on F(r) = r - r₀ - (erosive contribution at r) works
-        because F is monotonically increasing in r: higher r means more
-        transpiration, which reduces heat transfer, which reduces the
-        erosive increment, so F grows. F(r₀) < 0 (pure normal rate has
-        positive erosive deficit) and F(∞) > 0, guaranteeing a unique
-        root in [r₀, ∞).
-
-        30 iterations of bisection give precision of (r_hi - r_lo)/2³⁰
-        ≈ 1e-9 relative to the initial bracket width, which is more
-        than sufficient.
+        F(r) = r - r₀ - (erosive contribution at r) is monotonically
+        increasing in r: higher r means more transpiration, which reduces
+        heat transfer, which reduces the erosive increment. F(r₀) < 0 and
+        F(∞) > 0, so the root in [r₀, ∞) is unique and any sign change
+        brackets it. Illinois regula falsi keeps the bracket, converges in
+        about 5 evaluations where bisection needed 24-30, and stops at the
+        same 1e-8 m/s bracket width.
 
     Parameters
     ----------
@@ -396,12 +421,8 @@ def burn_rate_cell(
         Gas specific heat [J/(kg·K)].
     T_flame : float
         Gas flame temperature [K].
-    T_surface : float
-        Propellant surface temperature [K].
     rho_p : float
         Propellant density [kg/m³].
-    Cps : float
-        Propellant solid specific heat [J/(kg·K)].
     T_initial : float
         Initial propellant temperature [K].
     tab_min_p, tab_max_p, tab_a, tab_n : ndarray (n_tabs,)
@@ -410,6 +431,10 @@ def burn_rate_cell(
         Number of tabs.
     kappa : float
         Gnielinski temperature-ratio exponent [-].
+    ts_ln_rate, ts_values, h_values : ndarray
+        Surface temperature [K] and surface energy [J/kg] tables against ln(burn rate [m/s]); both rise with the burn rate.
+    r_guess : float
+        Previous total burn rate at this cell [m/s], or 0 for none. A good guess narrows the first bracket.
 
     Returns
     -------
@@ -432,6 +457,7 @@ def burn_rate_cell(
     f = haaland_friction(Re_local, roughness, D_hyd)
 
     # Nusselt number without transpiration
+    T_surface = surface_temperature(r0, ts_ln_rate, ts_values)
     Nu = gnielinski_nusselt(Re_local, Pr, D_hyd, x_from_head,
                              f, T_flame, T_surface, kappa)
 
@@ -441,66 +467,66 @@ def burn_rate_cell(
     if h0 < 1e-6:
         return r0, 0.0
 
-    # Energy balance factor:
-    #   ebf = (T_flame - T_surface) / (ρ_p · C_ps · (T_surface - T_initial))
-    # This has units of [K / (kg/m³ · J/(kg·K) · K)] = [m³·s²/kg] ... no.
-    # Actually: [K] / [kg/m³ · J/(kg·K) · K] = [K·m³·kg·K] / [kg·J·K]
-    # = [m³/J] ... still wrong. Let me just check: ebf * h0 has units of
-    # [m³/J?] * [W/m²] = ... The point is the algebra works out to [m/s].
-    T_diff_gas = T_flame - T_surface
-    T_diff_prop = T_surface - T_initial
-    if T_diff_prop < 1.0:
+    if T_surface - T_initial < 1.0:
         return r0, 0.0
-    ebf = T_diff_gas / (rho_p * Cps * T_diff_prop)
 
     # Precompute α = ρ_p · C_p_gas / h0 (appears in β = α·r)
     alpha = rho_p * Cp_gas / h0
 
-    # -----------------------------------------------------------
-    # Bisection on F(r) = r - r₀ - ebf · h₀ · β/(exp(β) - 1)
-    # F is monotonically increasing in r.
-    # -----------------------------------------------------------
-
-    # Bisection bounds
+    # F(r) = r - r₀ - ebf(r) · h₀ · β/(exp(β) - 1) is increasing in r, so the root is bracketed by any sign change.
     r_lo = r0
-    r_hi = r0 * 20.0  # Upper bound: 20× normal rate (generous)
-
-    # Verify bracket: F(r_lo) should be negative
-    beta_lo = alpha * r_lo
-    if beta_lo < 1e-6:
-        h_lo = h0
-    elif beta_lo > 500.0:
-        h_lo = 0.0
-    else:
-        h_lo = h0 * beta_lo / (np.exp(beta_lo) - 1.0)
-    F_lo = r_lo - r0 - ebf * h_lo
+    F_lo = _erosive_residual(r_lo, r0, alpha, h0, T_flame, rho_p, ts_ln_rate, ts_values, h_values)
 
     # If F_lo >= 0, no erosive burning possible (transpiration too strong)
     if F_lo >= 0.0:
         return r0, 0.0
 
-    # Bisection: 30 iterations gives precision of r_range / 2^30 ≈ 1e-9
-    for _ in range(30):
-        r_mid = 0.5 * (r_lo + r_hi)
-        beta_mid = alpha * r_mid
-        if beta_mid < 1e-6:
-            h_mid = h0 * (1.0 - beta_mid / 2.0)
-        elif beta_mid > 500.0:
-            h_mid = 0.0
-        else:
-            h_mid = h0 * beta_mid / (np.exp(beta_mid) - 1.0)
+    r_hi = r0 * 20.0  # Upper bound: 20× normal rate (generous)
+    F_hi = _erosive_residual(r_hi, r0, alpha, h0, T_flame, rho_p, ts_ln_rate, ts_values, h_values)
 
-        F_mid = r_mid - r0 - ebf * h_mid
+    # The previous root is usually within a fraction of a percent, so try a tight bracket around it first.
+    if r_guess > r0:
+        for width in (2e-3, 5e-2):
+            lo = max(r_guess * (1.0 - width), r0)
+            hi = min(r_guess * (1.0 + width), r_hi)
+            F_a = _erosive_residual(lo, r0, alpha, h0, T_flame, rho_p, ts_ln_rate, ts_values, h_values)
+            F_b = _erosive_residual(hi, r0, alpha, h0, T_flame, rho_p, ts_ln_rate, ts_values, h_values)
+            if F_a < 0.0 and F_b >= 0.0:
+                r_lo, F_lo, r_hi, F_hi = lo, F_a, hi, F_b
+                break
+            if F_a >= 0.0:
+                r_hi, F_hi = lo, F_a
+            elif F_b < 0.0:
+                r_lo, F_lo = hi, F_b
 
-        if F_mid < 0.0:
-            r_lo = r_mid
-        else:
-            r_hi = r_mid
-
-        if (r_hi - r_lo) < 1e-8:
-            break
-
+    # Illinois regula falsi. It stops at the bracket width the bisection used (1e-8 m/s), or when successive iterates
+    # coincide, which is what happens once one end of the bracket sits on the root and the other cannot close.
+    side = 0
+    r_prev = r_lo
     r_total = 0.5 * (r_lo + r_hi)
+    for _ in range(60):
+        r_new = (r_lo * F_hi - r_hi * F_lo) / (F_hi - F_lo)
+        F_new = _erosive_residual(r_new, r0, alpha, h0, T_flame, rho_p, ts_ln_rate, ts_values, h_values)
+        if F_new < 0.0:
+            r_lo = r_new
+            F_lo = F_new
+            if side == -1:
+                F_hi *= 0.5
+            side = -1
+        else:
+            r_hi = r_new
+            F_hi = F_new
+            if side == 1:
+                F_lo *= 0.5
+            side = 1
+        if (r_hi - r_lo) < 1e-8:
+            r_total = 0.5 * (r_lo + r_hi)
+            break
+        if abs(r_new - r_prev) < 1e-10:
+            r_total = r_new
+            break
+        r_prev = r_new
+        r_total = r_new
     r_erosive = r_total - r0
     return r_total, max(r_erosive, 0.0)
 
@@ -512,10 +538,10 @@ def burn_rate_cell(
 @njit(cache=True, fastmath=True)
 def compute_burn_rates(
     P, Re, D_hyd, x_centers, is_burning, roughness,
-    Pr, k_thermal, Cp_gas, T_flame, T_surface,
-    rho_p, Cps, T_initial,
+    Pr, k_thermal, Cp_gas, T_flame,
+    rho_p, T_initial,
     tab_min_p, tab_max_p, tab_a, tab_n, n_tabs,
-    kappa, N,
+    kappa, N, ts_ln_rate, ts_values, h_values, r_guess,
 ):
     """
     Compute burn rates for all cells in the domain.
@@ -545,12 +571,8 @@ def compute_burn_rates(
         Gas specific heat [J/(kg·K)].
     T_flame : float
         Flame temperature [K].
-    T_surface : float
-        Surface temperature [K].
     rho_p : float
         Propellant density [kg/m³].
-    Cps : float
-        Propellant specific heat [J/(kg·K)].
     T_initial : float
         Initial propellant temperature [K].
     tab_min_p, tab_max_p, tab_a, tab_n : ndarray (n_tabs,)
@@ -561,6 +583,10 @@ def compute_burn_rates(
         Gnielinski temperature-ratio exponent [-].
     N : int
         Number of cells.
+    ts_ln_rate, ts_values, h_values : ndarray
+        Surface temperature and energy tables; see `burn_rate_cell`.
+    r_guess : ndarray (N,)
+        Previous total burn rate at each cell, 0 where there is none.
 
     Returns
     -------
@@ -575,9 +601,9 @@ def compute_burn_rates(
         if is_burning[i]:
             r_total[i], r_erosive[i] = burn_rate_cell(
                 P[i], Re[i], D_hyd[i], x_centers[i], roughness,
-                Pr, k_thermal, Cp_gas, T_flame, T_surface,
-                rho_p, Cps, T_initial,
+                Pr, k_thermal, Cp_gas, T_flame,
+                rho_p, T_initial,
                 tab_min_p, tab_max_p, tab_a, tab_n, n_tabs,
-                kappa,
+                kappa, ts_ln_rate, ts_values, h_values, r_guess[i],
             )
     return r_total, r_erosive

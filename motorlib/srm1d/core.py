@@ -12,15 +12,16 @@ from numba import njit
 
 from .solver import piso_step, compute_dt_cfl, _nozzle_boundary_flow
 from .burn_rate import compute_burn_rates, haaland_friction
+from .surface import surfaceTables, DEFAULT_AP_VOLUME_FRACTION, DEFAULT_AP_MASS_FRACTION, DEFAULT_BINDER_MASS_FRACTION
 
 
 @dataclass
 class FlowProperties:
-    """Combustion gas and propellant inputs, SI units. Gas transport values should be CEA/RPA effective values."""
+    """Combustion gas and propellant inputs, SI units. Gas transport values are the CEA frozen-composition chamber values;
+    equilibrium (effective) values overpredict the erosive rate by about 45%."""
     rhoPropellant: float
     cpPropellant: float
     tFlame: float
-    tSurface: float
     tInitial: float
     gamma: float
     molarMass: float
@@ -35,6 +36,21 @@ class FlowProperties:
     kappa: float = 0.44
     kSolid: float = 0.271
     kappaZn: float = 1.0
+    apVolumeFraction: float = DEFAULT_AP_VOLUME_FRACTION
+    apMassFraction: float = DEFAULT_AP_MASS_FRACTION
+    binderMassFraction: float = DEFAULT_BINDER_MASS_FRACTION
+    metalMassFractions: dict = None
+    condensedPhaseHeat: bool = False
+
+    def surfaceTables(self):
+        """(ln burn rate, surface temperature, surface energy) tables from the ingredient laws. `apVolumeFraction` is the
+        volume fraction of the propellant that is AP. The surface energy is the sensible cps (Ts - Ti) of Ma et al. unless
+        `condensedPhaseHeat` is set, which uses ingredient energies from `apMassFraction`, `binderMassFraction` and
+        `metalMassFractions` (any remainder costed with Al's table) including the condensed-phase heat release."""
+        if self.condensedPhaseHeat:
+            return surfaceTables(self.apVolumeFraction, self.tInitial, None, self.apMassFraction, self.binderMassFraction,
+                                  self.metalMassFractions)
+        return surfaceTables(self.apVolumeFraction, self.tInitial, cps=self.cpPropellant)
 
     @property
     def rSpecific(self):
@@ -68,16 +84,17 @@ def advanceFlow(
     rho, u, P, T, aPort, dHyd, burnLength, xCenters,
     rTotal, rErosive, rIntegral, fDarcy, Re, Mach, uCell,
     dx, n, aThroat, pAmbient, tAmbient,
-    rhoP, cps, tSurface, tInitial, tFlame, cpGas, muGas, kThermal, prandtl,
+    rhoP, tInitial, tFlame, cpGas, muGas, kThermal, prandtl,
     gamma, rSpecific, roughness, kappa,
     tabMinP, tabMaxP, tabA, tabN, nTabs,
     erosiveEnabled, cfl, dtMax, burnUpdateInterval, portMachCap, tSpan, maxSteps,
-    rDyn, rQs, rQsErosive, solidAlpha, kappaZn,
+    rDyn, rQs, rQsErosive, solidAlpha, kappaZn, tsLnRate, tsValues, hValues,
 ):
     """Advance the gas state by `tSpan` seconds (or `maxSteps`). `rIntegral` accumulates r_total*dt per cell.
 
     The quasi-steady Ma burn rate is relaxed toward over the condensed-phase thermal-wave time
     tau = kappaZn * solidAlpha / r^2 (Greatrix lag form); kappaZn = 0 disables the lag. `rDyn` persists between calls.
+    `tsLnRate`, `tsValues`, `hValues` tabulate surface temperature and surface energy against ln(burn rate); see `FlowProperties`.
 
     Returns (elapsed, nozzle mass flow integral [kg], steps)."""
     gammaArr = np.full(n, gamma)
@@ -101,9 +118,9 @@ def advanceFlow(
         if step % burnUpdateInterval == 0:
             rTotalNew, rErosiveNew = compute_burn_rates(
                 P, Re, dHyd, xCenters, isBurning, roughness,
-                prandtl, kThermal, cpGas, tFlame, tSurface,
-                rhoP, cps, tInitial,
-                tabMinP, tabMaxP, tabA, tabN, nTabs, kappa, n,
+                prandtl, kThermal, cpGas, tFlame,
+                rhoP, tInitial,
+                tabMinP, tabMaxP, tabA, tabN, nTabs, kappa, n, tsLnRate, tsValues, hValues, rQs,
             )
             for i in range(n):
                 if erosiveEnabled:

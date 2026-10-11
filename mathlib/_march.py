@@ -6,6 +6,8 @@ import os
 try:
     from ._march_cy import mc_surface_area as _mc_surface_area_cy  # type: ignore[import-not-found]
     from ._march_cy import mc_surface_area_by_layer as _mc_surface_area_by_layer_cy  # type: ignore[import-not-found]
+    from ._march_cy import contour_length_by_slice as _contour_length_by_slice_cy  # type: ignore[import-not-found]
+    from ._march_cy import extend_into_mask as _extend_into_mask_cy  # type: ignore[import-not-found]
     _CY_AVAILABLE = True
 except ImportError:
     _CY_AVAILABLE = False
@@ -91,3 +93,31 @@ def marching_area_pixels_by_layer(regression_map, valid_mask, level, z_scale=1.0
     return np.array([
         marching_area_pixels(grid[k:k + 2], mask[k:k + 2], lvl) or 0.0 for k in range(grid.shape[0] - 1)
     ])
+
+
+def contour_length_by_slice(field, level=0.0):
+    """Length in pixel units of the `level` contour of each z-slice of a 3-D field, shape (nz,). Matches the summed segment
+    length of skimage.measure.find_contours on every slice."""
+    grid = np.ascontiguousarray(field, dtype=np.float64)
+    if grid.ndim != 3:
+        raise ValueError(f"field must be 3-D, got shape {grid.shape!r}")
+    if _CY_AVAILABLE:
+        return np.asarray(_contour_length_by_slice_cy(grid, float(level)))
+    from skimage import measure
+    return np.array([
+        sum(np.hypot(*np.diff(c, axis=0).T).sum() for c in measure.find_contours(plane, level)) if plane.min() < level < plane.max() else 0.0
+        for plane in grid
+    ])
+
+
+def extend_into_mask(field, masked, source):
+    """Copy of the 3-D `field` in which the in-slice flat positions `masked` take the value at `source` on every slice."""
+    grid = np.ascontiguousarray(field, dtype=np.float64)
+    masked = np.ascontiguousarray(masked, dtype=np.int64)
+    source = np.ascontiguousarray(source, dtype=np.int64)
+    if _CY_AVAILABLE:
+        return np.asarray(_extend_into_mask_cy(grid, masked, source))
+    out = grid.copy()
+    flat = out.reshape(out.shape[0], -1)
+    flat[:, masked] = grid.reshape(grid.shape[0], -1)[:, source]
+    return out

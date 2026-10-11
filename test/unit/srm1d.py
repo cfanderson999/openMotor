@@ -6,7 +6,12 @@ import numpy as np
 from motorlib.grains import Finocyl
 
 from motorlib.srm1d import FlowProperties, advanceFlow, BurnbackGrid, runBurn, chooseStride
+from motorlib.srm1d.quasisteady import advanceQuasiSteady
+from motorlib.srm1d.coupled import _seedSteadyState
 from motorlib.srm1d.coupled import MA2020_VALIDATED
+from motorlib.srm1d.burn_rate import surface_temperature, erosive_energy_factor, compute_burn_rates
+from motorlib.srm1d.surface import (apSurfaceTemperature, binderSurfaceTemperature, surfaceTables, apSurfaceEnthalpy,
+                                    binderSurfaceEnthalpy, metalEnthalpy, DEFAULT_AP_VOLUME_FRACTION)
 
 _N_EXP = 0.35
 _A = 0.005 / 6e6 ** _N_EXP
@@ -14,7 +19,7 @@ _BORE, _LENGTH, _THROAT, _CELLS = 0.05, 0.5, 0.02, 40
 
 
 def _flowProperties():
-    return FlowProperties(rhoPropellant=1700., cpPropellant=1500., tFlame=2800., tSurface=800., tInitial=300.,
+    return FlowProperties(rhoPropellant=1700., cpPropellant=1500., tFlame=2800., tInitial=300.,
                           gamma=1.2, molarMass=0.025, cpGas=1995., muGas=8e-5, kGas=0.4,
                           tabMinP=np.array([0.]), tabMaxP=np.array([1e9]), tabA=np.array([_A]), tabN=np.array([_N_EXP]))
 
@@ -31,11 +36,136 @@ def _runStraightBore(erosive):
     work = [np.zeros(n) for _ in range(10)]
     advanceFlow(rho, u, P, T, aPort, np.full(n, _BORE), np.full(n, np.pi * _BORE), x, *work[:7],
                 dx, n, np.pi / 4 * _THROAT ** 2, 101325., 300.,
-                fp.rhoPropellant, fp.cpPropellant, fp.tSurface, fp.tInitial, fp.tFlame,
+                fp.rhoPropellant, fp.tInitial, fp.tFlame,
                 fp.cpGas, fp.muGas, fp.kGas, fp.prandtl, fp.gamma, fp.rSpecific, fp.roughness, fp.kappa,
                 fp.tabMinP, fp.tabMaxP, fp.tabA, fp.tabN, 1, erosive, 0.5, 1e-4, 1, 0.0, 0.3, 10_000_000,
-                *work[7:], fp.solidDiffusivity, fp.kappaZn)
+                *work[7:], fp.solidDiffusivity, fp.kappaZn, *fp.surfaceTables())
     return fp, P, work[0], work[1]
+
+
+class TestSurfaceTemperature(unittest.TestCase):
+    def testApLawMatchesLengelleAtTenMillimetresPerSecond(self):
+        self.assertAlmostEqual(apSurfaceTemperature(0.010), 925., delta=10.)
+
+    def testBinderLawMatchesQuotedPyrometryPoint(self):
+        self.assertAlmostEqual(binderSurfaceTemperature(0.4e-3, 293.), 1060., delta=1.)
+
+    def testSurfaceRunsHotterAtHigherBurnRate(self):
+        rates = [0.002, 0.005, 0.01, 0.02]
+        for law in (apSurfaceTemperature, lambda r: binderSurfaceTemperature(r, 293.)):
+            self.assertTrue(np.all(np.diff([law(r) for r in rates]) > 0))
+
+    def testTableBlendsIngredientsByVolumeFraction(self):
+        lnRate, temp, _ = surfaceTables(0.8, 293., cps=1500.)
+        rate = 0.01
+        expected = 0.8 * apSurfaceTemperature(rate) + 0.2 * binderSurfaceTemperature(rate, 293.)
+        self.assertAlmostEqual(surface_temperature(rate, lnRate, temp), expected, delta=1.)
+
+    def testPureApTableEqualsApLaw(self):
+        lnRate, temp, _ = surfaceTables(1.0, 293., cps=1500.)
+        self.assertAlmostEqual(surface_temperature(0.007, lnRate, temp), apSurfaceTemperature(0.007), delta=0.5)
+
+    def testDefaultUsesDocumentedApVolumeFraction(self):
+        fp = _flowProperties()
+        self.assertEqual(fp.apVolumeFraction, DEFAULT_AP_VOLUME_FRACTION)
+        lnRate, temp, _ = fp.surfaceTables()
+        expected = surfaceTables(DEFAULT_AP_VOLUME_FRACTION, fp.tInitial, cps=fp.cpPropellant)[1]
+        self.assertTrue(np.array_equal(temp, expected))
+
+    def testErosiveGainFallsAsBurnRateRises(self):
+        lnRate, temp, enthalpy = surfaceTables(0.8, 293., cps=1500.)
+        gains = [erosive_energy_factor(r, 2800., 1700., lnRate, temp, enthalpy) for r in (0.005, 0.01, 0.02)]
+        self.assertTrue(np.all(np.diff(gains) < 0))
+
+
+class TestSurfaceEnergy(unittest.TestCase):
+    def testSensibleTableIsCpTimesTemperatureRise(self):
+        _, temp, enthalpy = surfaceTables(0.6, 293., cps=1600.)
+        self.assertTrue(np.allclose(enthalpy, 1600. * (temp - 293.)))
+
+    def testApEnergyMatchesLengelleAtTenMillimetresPerSecond(self):
+        self.assertAlmostEqual(apSurfaceEnthalpy(925.), 175. * 4184., delta=1.)
+
+    def testBinderEnergyMatchesAblationHeatAtQuotedPoint(self):
+        self.assertAlmostEqual(binderSurfaceEnthalpy(1060., 293.) / 4184., 749., delta=2.)
+
+    def testMetalEnergyIncludesFusion(self):
+        jump = metalEnthalpy(1000., 293.) - metalEnthalpy(900., 293.)
+        self.assertGreater(jump, 5.0e5)
+
+    def testPureApCondensedTableEqualsApEnergy(self):
+        lnRate, temp, enthalpy = surfaceTables(1.0, 293., None, 1.0, 0.0)
+        i = np.abs(np.exp(lnRate) - 0.01).argmin()
+        self.assertAlmostEqual(enthalpy[i], apSurfaceEnthalpy(apSurfaceTemperature(np.exp(lnRate[i]))), delta=1.)
+
+    def testCondensedEnergyIsMassWeightedSum(self):
+        lnRate, _, enthalpy = surfaceTables(0.6, 293., None, 0.7, 0.16)
+        r = np.exp(lnRate[64]); tA = apSurfaceTemperature(r); tB = binderSurfaceTemperature(r, 293.)
+        expected = 0.7 * apSurfaceEnthalpy(tA) + 0.16 * binderSurfaceEnthalpy(tB, 293.) + 0.14 * metalEnthalpy(tB, 293.)
+        self.assertAlmostEqual(enthalpy[64], expected, delta=1.)
+
+    def testMassFractionsAboveOneAreRejected(self):
+        with self.assertRaises(ValueError):
+            surfaceTables(0.6, 293., None, 0.8, 0.3)
+
+    def testMetalSpeciesEnergyDiffersFromAl(self):
+        # Zn's enthalpy table is its own (lower, from CEA Zn(cr)/Zn(L)), not Al's.
+        self.assertLess(metalEnthalpy(1500., 293., 'Zn'), 0.5 * metalEnthalpy(1500., 293., 'Al'))
+
+    def testCondensedEnergyUsesPerMetalSpecies(self):
+        # Fractions sum to exactly one so no leftover falls back to Al.
+        lnRate, _, enthalpy = surfaceTables(0.6, 293., None, 0.5, 0.15, {'Zn': 0.20, 'Mg': 0.15})
+        r = np.exp(lnRate[64]); tA = apSurfaceTemperature(r); tB = binderSurfaceTemperature(r, 293.)
+        expected = (0.5 * apSurfaceEnthalpy(tA) + 0.15 * binderSurfaceEnthalpy(tB, 293.)
+                    + 0.20 * metalEnthalpy(tB, 293., 'Zn') + 0.15 * metalEnthalpy(tB, 293., 'Mg'))
+        self.assertAlmostEqual(enthalpy[64], expected, delta=1.)
+
+    def testUnassignedMetalRemainderFallsBackToAl(self):
+        lnRate, _, enthalpy = surfaceTables(0.6, 293., None, 0.7, 0.16, {'Zn': 0.05})
+        r = np.exp(lnRate[64]); tA = apSurfaceTemperature(r); tB = binderSurfaceTemperature(r, 293.)
+        expected = (0.7 * apSurfaceEnthalpy(tA) + 0.16 * binderSurfaceEnthalpy(tB, 293.)
+                    + 0.05 * metalEnthalpy(tB, 293., 'Zn') + 0.09 * metalEnthalpy(tB, 293., 'Al'))
+        self.assertAlmostEqual(enthalpy[64], expected, delta=1.)
+
+    def testMetalSpeciesFractionsAboveRemainderAreRejected(self):
+        with self.assertRaises(ValueError):
+            surfaceTables(0.6, 293., None, 0.7, 0.16, {'Zn': 0.50})
+
+
+class TestBurnRateRootFind(unittest.TestCase):
+    """The erosive burn rate is the root of a monotone residual, found from any starting guess."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.fp = _flowProperties()
+        cls.tables = cls.fp.surfaceTables()
+        rng = np.random.default_rng(5)
+        cls.n = 60
+        cls.pressure = rng.uniform(2e6, 1.4e7, cls.n)
+        cls.reynolds = 10 ** rng.uniform(4.5, 6.5, cls.n)
+        cls.diameter = rng.uniform(0.02, 0.04, cls.n)
+        cls.x = np.linspace(0.01, 1.0, cls.n)
+
+    def _rates(self, guess):
+        fp = self.fp
+        return compute_burn_rates(
+            self.pressure, self.reynolds, self.diameter, self.x, np.ones(self.n, dtype=bool), fp.roughness, fp.prandtl,
+            fp.kGas, fp.cpGas, fp.tFlame, fp.rhoPropellant, fp.tInitial, fp.tabMinP, fp.tabMaxP, fp.tabA, fp.tabN, 1,
+            fp.kappa, self.n, *self.tables, guess,
+        )
+
+    def testRootIsIndependentOfTheStartingGuess(self):
+        cold, _ = self._rates(np.zeros(self.n))
+        for scale in (1.001, 0.9, 3.0):
+            warm, _ = self._rates(cold * scale)
+            np.testing.assert_allclose(warm, cold, rtol=0, atol=2e-8)
+
+    def testErosiveRateIsTheTotalMinusTheNormalRate(self):
+        total, erosive = self._rates(np.zeros(self.n))
+        normal = self.fp.tabA[0] * self.pressure ** self.fp.tabN[0]
+        np.testing.assert_allclose(total - erosive, normal, rtol=1e-9)
+        self.assertTrue(np.all(erosive >= 0.0))
+        self.assertGreater(float(erosive.max()), 0.0)
 
 
 class TestStraightBoreSteadyState(unittest.TestCase):
@@ -51,7 +181,7 @@ class TestStraightBoreSteadyState(unittest.TestCase):
     def testErosiveBurningRaisesPressureAndPeaksAft(self):
         _, pNormal, _, _ = _runStraightBore(erosive=False)
         _, pErosive, rTotal, rErosive = _runStraightBore(erosive=True)
-        self.assertGreater(pErosive[-1], 1.03 * pNormal[-1])
+        self.assertGreater(pErosive[-1], 1.015 * pNormal[-1])
         ratio = rErosive / rTotal
         self.assertLess(ratio[0], 0.01)
         self.assertTrue(np.all(np.diff(ratio) >= -1e-6))
@@ -128,6 +258,179 @@ class TestCoupledBurn(unittest.TestCase):
         fine = runBurn(BurnbackGrid(phi, valid, voxel), flowStride=1, **kwargs)
         coarse = runBurn(BurnbackGrid(phi, valid, voxel), flowStride=chooseStride(_SLICES - 1, 5 * voxel, voxel), **kwargs)
         self.assertAlmostEqual(coarse.headPressure[-1] / fine.headPressure[-1], 1.0, delta=0.01)
+
+
+class TestQuasiSteadyFlow(unittest.TestCase):
+    """The quasi-steady bore flow is the steady limit of the transient solver, with the chamber filling at its own pace."""
+
+    @staticmethod
+    def _straightBore(solver, span, erosive=True):
+        fp = _flowProperties()
+        n, dx = _CELLS, _LENGTH / _CELLS
+        x = (np.arange(n) + 0.5) * dx
+        aPort = np.full(n, np.pi / 4 * _BORE ** 2)
+        dHyd, burn = np.full(n, _BORE), np.full(n, np.pi * _BORE)
+        aThroat = np.pi / 4 * _THROAT ** 2
+        P = np.full(n, 101325.)
+        T = np.full(n, fp.tInitial)
+        rho = P / (fp.rSpecific * T)
+        u = np.zeros(n + 1)
+        _seedSteadyState(aPort, dHyd, burn, dx, aThroat, fp, 101325., P, T, rho, u)
+        work = [np.zeros(n) for _ in range(10)]
+        common = (rho, u, P, T, aPort, dHyd, burn, x, *work[:7], dx, n, aThroat, 101325., fp.tInitial, fp.rhoPropellant,
+                  fp.tInitial, fp.tFlame, fp.cpGas, fp.muGas, fp.kGas, fp.prandtl, fp.gamma, fp.rSpecific, fp.roughness,
+                  fp.kappa, fp.tabMinP, fp.tabMaxP, fp.tabA, fp.tabN, 1)
+        tail = (*work[7:], fp.solidDiffusivity, fp.kappaZn, *fp.surfaceTables())
+        if solver == 'transient':
+            advanceFlow(*common, erosive, 0.5, 1e-4, 10, 0.0, span, 100_000_000, *tail)
+        else:
+            advanceQuasiSteady(*common, erosive, 1e-3, 0.25, span, *tail, np.zeros(n + 1))
+        return P, u, work[0]
+
+    def testSettledStateMatchesTheTransientSolver(self):
+        pT, uT, rT = self._straightBore('transient', 0.3)
+        pQ, uQ, rQ = self._straightBore('quasi-steady', 0.3)
+        np.testing.assert_allclose(pQ, pT, rtol=2e-4)
+        np.testing.assert_allclose(uQ[1:], uT[1:], rtol=2e-4)
+        np.testing.assert_allclose(rQ, rT, rtol=2e-4)
+
+    def testPressureFallsAlongTheBoreAndErosionRaisesIt(self):
+        pErosive, _, _ = self._straightBore('quasi-steady', 0.3, erosive=True)
+        pNormal, _, _ = self._straightBore('quasi-steady', 0.3, erosive=False)
+        self.assertTrue(np.all(np.diff(pErosive) < 0.0))
+        self.assertGreater(pErosive[-1], 1.015 * pNormal[-1])
+
+    def testChamberFillsTowardTheSteadyPressureFromBelow(self):
+        early, _, _ = self._straightBore('quasi-steady', 0.002)
+        late, _, _ = self._straightBore('quasi-steady', 0.3)
+        self.assertLess(early[-1], late[-1])
+
+    def testCoupledBurnTracksTheTransientSolver(self):
+        phi, valid, voxel = _cylinderField()
+        kwargs = dict(props=_flowProperties(), throatDiameter=0.0064, tMax=0.3, pCutoff=0.0)
+        transient = runBurn(_AnalyticBore(voxel), flow='transient', **kwargs)
+        quasi = runBurn(_AnalyticBore(voxel), flow='quasi-steady', **kwargs)
+        for t in (0.05, 0.15, 0.3):
+            self.assertAlmostEqual(np.interp(t, quasi.time, quasi.headPressure) / np.interp(t, transient.time, transient.headPressure),
+                                   1.0, delta=0.02)
+
+    def testQuasiSteadyIsTheDefaultFlowSolver(self):
+        phi, valid, voxel = _cylinderField()
+        kwargs = dict(props=_flowProperties(), throatDiameter=0.0064, tMax=0.1, pCutoff=0.0)
+        default = runBurn(_AnalyticBore(voxel), **kwargs)
+        quasi = runBurn(_AnalyticBore(voxel), flow='quasi-steady', **kwargs)
+        np.testing.assert_array_equal(default.headPressure, quasi.headPressure)
+
+    def testUnknownFlowSolverIsRejected(self):
+        phi, valid, voxel = _cylinderField()
+        with self.assertRaises(ValueError):
+            runBurn(_AnalyticBore(voxel), _flowProperties(), 0.0064, flow='nope')
+
+
+class TestLevelSetAdvance(unittest.TestCase):
+    """The narrow band advance against the scikit-fmm one it can replace."""
+
+    @classmethod
+    def setUpClass(cls):
+        slices = 150
+        cls.voxel = _CASTING / _VOXEL_COUNT
+        n = _VOXEL_COUNT + 2
+        centre = (n - 1) / 2
+        y, x = np.meshgrid(np.arange(n) - centre, np.arange(n) - centre, indexing='ij')
+        radial = np.hypot(x, y) * cls.voxel
+        taper = _GRID_BORE * (1.0 + 0.4 * np.linspace(0.0, 1.0, slices))
+        cls.phi = radial[None] - taper[:, None, None]
+        cls.valid2d = radial <= _CASTING / 2
+        cls.slabSpeed = np.linspace(0.004, 0.009, slices - 1)
+        cls.dt = 0.6 * cls.voxel / 0.009
+
+    def _grid(self, method):
+        return BurnbackGrid(self.phi, self.valid2d, self.voxel, advanceMethod=method)
+
+    def testNarrowBandIsTheDefault(self):
+        self.assertEqual(BurnbackGrid(self.phi, self.valid2d, self.voxel).advanceMethod, 'narrow-band')
+
+    def testUnknownMethodIsRejected(self):
+        with self.assertRaises(ValueError):
+            BurnbackGrid(self.phi, self.valid2d, self.voxel, advanceMethod='nope')
+
+    def testNarrowBandIsAnExactShiftWhenTheStepIsTiny(self):
+        grid = self._grid('narrow-band')
+        grid.advance(self.slabSpeed, 1e-9)
+        sliceSpeed = np.interp(np.arange(self.phi.shape[0]), np.arange(self.phi.shape[0] - 1) + 0.5, self.slabSpeed)
+        shifted = np.where(grid.valid, self.phi - sliceSpeed[:, None, None] * 1e-9, self.phi)
+        np.testing.assert_allclose(grid.phi, shifted, rtol=0, atol=1e-12)
+
+    def testNarrowBandStaysCloseToScikitFmmOverARealStep(self):
+        banded, marched = self._grid('narrow-band'), self._grid('scikit-fmm')
+        banded.advance(self.slabSpeed, self.dt)
+        marched.advance(self.slabSpeed, self.dt)
+        nearSurface = np.abs(marched.phi) < self.voxel
+        self.assertLess(float(np.abs(banded.phi - marched.phi)[nearSurface].mean()) / self.voxel, 0.05)
+        newLength, oldLength = banded.wettedPerimeter(), marched.wettedPerimeter()
+        self.assertLess(float(np.abs(newLength - oldLength).max() / oldLength.max()), 0.03)
+
+    def testNarrowBandResultDoesNotDependOnThreadCount(self):
+        from mathlib._levelset import advance_level_set
+        speed = np.linspace(0.004, 0.009, self.phi.shape[0])
+        one = advance_level_set(self.phi, self.valid2d, speed, self.voxel, self.dt, threads=1)
+        many = advance_level_set(self.phi, self.valid2d, speed, self.voxel, self.dt, threads=4)
+        np.testing.assert_array_equal(one, many)
+
+    def testMaskedVoxelsAreUntouched(self):
+        grid = self._grid('narrow-band')
+        grid.advance(self.slabSpeed, self.dt)
+        outside = np.broadcast_to(~self.valid2d, self.phi.shape)
+        np.testing.assert_array_equal(grid.phi[outside], self.phi[outside])
+
+
+class TestBurnbackWallRing(unittest.TestCase):
+    """With the wall ring the burning surface of a tapered bore runs all the way to the casting wall."""
+
+    @classmethod
+    def setUpClass(cls):
+        slices, n = 140, 36
+        cls.voxel = 0.001
+        centre = (n - 1) / 2
+        y, x = np.meshgrid(np.arange(n) - centre, np.arange(n) - centre, indexing='ij')
+        cls.radial = np.hypot(x, y)
+        cls.wall = 17.0
+        cls.valid = cls.radial <= cls.wall
+        cls.bore = 4.0 + 5.0 * np.linspace(0.0, 1.0, slices)
+        cls.propellant = cls.radial[None] > cls.bore[:, None, None]
+        cls.slope = 5.0 / (slices - 1)
+
+    def _burnAreaError(self, wallRing, distance):
+        grid = BurnbackGrid.fromMask(self.propellant, self.valid, self.voxel, advanceMethod='narrow-band', wallRing=wallRing)
+        steps = int(round(distance / (0.5 * self.voxel)))
+        for _ in range(steps):
+            grid.advance(np.full(grid.nSlabs, 1.0), 0.5 * self.voxel)
+        z = np.arange(grid.nSlabs) + 0.5
+        bore = np.interp(z, np.arange(len(self.bore)), self.bore) * self.voxel
+        cosine = 1.0 / np.sqrt(1.0 + self.slope ** 2)
+        surface = bore + steps * 0.5 * self.voxel / cosine
+        burning = surface < self.wall * self.voxel
+        analytic = float(np.sum(2.0 * np.pi * surface / cosine * self.voxel * burning))
+        return grid.slabBurnArea().sum() / analytic - 1.0
+
+    def testRingHasNoEffectEarlyInTheBurn(self):
+        self.assertAlmostEqual(self._burnAreaError(True, 2e-3), self._burnAreaError(False, 2e-3), delta=0.005)
+
+    def testRingBringsTheLateBurnAreaCloserToTheClosedForm(self):
+        flat, ring = self._burnAreaError(False, 9e-3), self._burnAreaError(True, 9e-3)
+        self.assertLess(abs(ring), abs(flat))
+
+    def testNoBurningSurfaceRemainsOnceTheTubeIsBurnedThrough(self):
+        grid = BurnbackGrid.fromMask(self.propellant, self.valid, self.voxel, advanceMethod='narrow-band', wallRing=True)
+        for _ in range(60):
+            grid.advance(np.full(grid.nSlabs, 1.0), 0.5 * self.voxel)
+        self.assertEqual(float(grid.slabBurnArea().sum()), 0.0)
+
+    def testRingIsTheDefaultWhenBuildingFromAMask(self):
+        self.assertIsNotNone(BurnbackGrid.fromMask(self.propellant, self.valid, self.voxel).wallRing)
+
+    def testRingCanBeLeftOut(self):
+        self.assertIsNone(BurnbackGrid.fromMask(self.propellant, self.valid, self.voxel, wallRing=False).wallRing)
 
 
 class TestFinocylBurnback(unittest.TestCase):
