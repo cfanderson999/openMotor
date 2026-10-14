@@ -66,12 +66,15 @@ def getConfigPath():
 
 def passthrough(data):
     return data
-    
-#0.6.1 to 0.6.2
-def migrateMotor_0_6_1_to_0_6_2(data):
-    data['config']['dualAxis'] = DEFAULT_PREFERENCES['general']['dualAxis']
-    return data
 
+# 0.6.1 to 0.6.2
+def migrateProp_0_6_1_to_0_6_2(data):
+    # Add RCS propellants to library
+    for propellant in DEFAULT_PROPELLANTS:
+        if propellant['name'] not in [cProp['name'] for cProp in data]:
+            data.append(propellant)
+    return data
+    
 #0.6.0 to 0.6.1
 def migrateMotor_0_6_0_to_0_6_1(data):
     data['config']['maxMachNumber'] = DEFAULT_PREFERENCES['general']['maxMachNumber']
@@ -178,15 +181,15 @@ migrations = {
     (0, 6, 1): {
         'to': (0, 6, 2),
         fileTypes.PREFERENCES: passthrough,
-        fileTypes.PROPELLANTS: passthrough,
-        fileTypes.MOTOR: migrateMotor_0_6_1_to_0_6_2,
+        fileTypes.PROPELLANTS: migrateProp_0_6_1_to_0_6_2,
+        fileTypes.MOTOR: passthrough,
         fileTypes.RECENT_FILES: passthrough
     },
     (0, 6, 0): {
         'to': (0, 6, 1),
         fileTypes.PREFERENCES: passthrough,
         fileTypes.PROPELLANTS: passthrough,
-        fileTypes.MOTOR: migrateMotor_0_6_0_to_0_6_1,
+         fileTypes.MOTOR: migrateMotor_0_6_0_to_0_6_1,
         fileTypes.RECENT_FILES: passthrough
     },
     (0, 5, 0): {
