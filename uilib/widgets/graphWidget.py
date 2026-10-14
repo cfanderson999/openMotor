@@ -37,6 +37,7 @@ class GraphWidget(FigureCanvas):
         xAxisUnit = self.preferences.getUnit(simResult.channels[xChannel].unit)
 
         legend = []
+        dualAxis = self.preferences.ui.getProperty('dualAxis') and len(yChannels) == 2
 
         if simResult.channels[xChannel].valueType in (list, tuple):
             if len(grains) > 0:
@@ -48,7 +49,9 @@ class GraphWidget(FigureCanvas):
 
         for channelNum, channelName in enumerate(yChannels):
             plotter = self.plot
-            if self.preferences.getDict()['general']['dualAxis'] and len(yChannels) == 2 and channelNum == 1:
+            lineStyle = '-'
+            if dualAxis and channelNum == 1:
+                lineStyle = '--' # Dashed to tell the second axis apart
                 self.figure.subplots_adjust(right=0.9, left=0.1)
                 plotter = ParasiteAxes(self.plot, sharex=self.plot)
                 self.plot.parasites.append(plotter)
@@ -60,9 +63,9 @@ class GraphWidget(FigureCanvas):
             yUnit = self.preferences.getUnit(channel.unit)
             if channel.valueType in (list, tuple) and len(grains) > 0:
                 yData = selectGrains(channel.getData(yUnit), grains)
-                plotter.plot(xData, yData)
+                plotter.plot(xData, yData, linestyle=lineStyle)
             elif channel.valueType in (int, float):
-                plotter.plot(xData, channel.getData(yUnit))
+                plotter.plot(xData, channel.getData(yUnit), linestyle=lineStyle)
             if channel.valueType in (int, float):
                 if yUnit != '':
                     legend.append('{} - {}'.format(channel.name, yUnit))
@@ -75,13 +78,12 @@ class GraphWidget(FigureCanvas):
                             legend.append('{} - Grain {} - {}'.format(channel.name, i + 1, yUnit))
                         else:
                             legend.append('{} - Grain {}'.format(channel.name, i + 1))
-            
-            if self.preferences.getDict()['general']['dualAxis'] and len(yChannels) == 2:
-                plotter2 = self.plot if channelNum == 0 else plotter
+
+            if dualAxis:
                 if yUnit != '':
-                    plotter2.set_ylabel('{} - {}'.format(channel.name, yUnit))
+                    plotter.set_ylabel('{} - {}'.format(channel.name, yUnit))
                 else:
-                    plotter2.set_ylabel(channel.name)
+                    plotter.set_ylabel(channel.name)
 
         self.plot.legend(legend)
         self.plot.set_xlabel('{} - {}'.format(simResult.channels[xChannel].name, xAxisUnit))
