@@ -23,4 +23,3 @@ sphinx==7.0.1
 trimesh==4.5.3
 shapely==2.0.6
 cadquery>=2.4.0
-numba==0.58.1

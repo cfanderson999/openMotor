@@ -1,5 +1,3 @@
-import math
-import itertools
 import os
 
 from PyQt6.QtWidgets import QWidget, QPushButton, QHBoxLayout, QVBoxLayout, QLabel, QSizePolicy, QFileDialog, QApplication

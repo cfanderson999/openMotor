@@ -8,6 +8,7 @@ import motorlib.propellant
 from motorlib.coreprofiles import STEADY_METRICS, availableMetrics, getCoreProfiles
 from motorlib.simResult import SimulationResult
 from uilib import coreShading
+from uilib.grainStack import GrainStack
 
 _PROPELLANT = {
     'name': 'Test', 'density': 1700,
@@ -154,16 +155,49 @@ class TestCoreShading(unittest.TestCase):
         colors = coreShading.sliceColors(np.full(5, 3.0), 3.0, 3.0)
         self.assertEqual(len({tuple(c) for c in colors}), 1)
 
-    def test_images_put_the_head_end_in_the_top_row_and_the_axial_plane_in_one_colour(self):
+    def test_images_put_the_head_end_in_the_left_column_and_the_axial_plane_in_one_colour(self):
         colors = coreShading.sliceColors(np.arange(4.0), 0.0, 3.0)
         side = coreShading.sideImage(colors, 5)
-        self.assertEqual(side.shape, (4, 5, 4))
+        self.assertEqual(side.shape, (5, 4, 4))
         np.testing.assert_array_equal(side[0, 0], colors[3])
-        np.testing.assert_array_equal(side[3, 4], colors[0])
+        np.testing.assert_array_equal(side[4, 3], colors[0])
         axial = coreShading.axialImage(colors, 2, (6, 5))
         self.assertEqual(axial.shape, (6, 5, 4))
         self.assertEqual(len({tuple(p) for p in axial.reshape(-1, 4)}), 1)
         np.testing.assert_array_equal(axial[0, 0], colors[2])
+
+
+class _Grain:
+    def __init__(self, slices, mapDim=4, fill=0.0):
+        self.regressionMap = np.full((slices, mapDim, mapDim), fill, dtype=np.float32)
+        self.mask = np.zeros((slices, mapDim, mapDim), dtype=bool)
+
+
+class TestGrainStack(unittest.TestCase):
+    def test_the_full_motor_stacks_the_grains_from_the_aft_end(self):
+        head, aft = _Grain(3, fill=1.0), _Grain(2, fill=2.0)
+        stack = GrainStack.fullMotor([(0, head), (1, aft)])
+        self.assertEqual(stack.gids, [1, 0])
+        self.assertEqual(stack.regressionMap.shape, (5, 4, 4))
+        self.assertEqual(stack.regressionMap[:, 0, 0].tolist(), [2, 2, 1, 1, 1])
+        self.assertEqual(stack.mask.shape, (5, 4, 4))
+
+    def test_a_single_grain_is_its_own_stack(self):
+        stack = GrainStack.single(3, _Grain(4))
+        self.assertEqual(stack.gids, [3])
+        self.assertEqual(stack.regressionMap.shape, (4, 4, 4))
+
+    def test_grains_of_another_cross_section_are_left_out_of_the_full_motor(self):
+        stack = GrainStack.fullMotor([(0, _Grain(2)), (1, _Grain(2, mapDim=6)), (2, _Grain(3))])
+        self.assertEqual(stack.gids, [2, 0])
+
+    def test_values_are_joined_in_stack_order_with_a_fill_for_grains_without_any(self):
+        stack = GrainStack.fullMotor([(0, _Grain(3)), (1, _Grain(2))])
+        joined = stack.join(lambda gid, grain: np.full(3, 7.0) if gid == 0 else None, np.nan)
+        self.assertTrue(np.all(np.isnan(joined[:2])))
+        self.assertEqual(joined[2:].tolist(), [7.0, 7.0, 7.0])
+        rows = stack.join(lambda gid, grain: None, (1, 2, 3, 4))
+        self.assertEqual(rows.shape, (5, 4))
 
 
 try:

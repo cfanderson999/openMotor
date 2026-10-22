@@ -75,10 +75,6 @@ class _FlowGrid:
         return aCell, 4.0 * aCell / np.maximum(wetted, 1e-12), self.average(burnLength)
 
 
-def _groupGeometry(aPort, dHyd, burnLength, stride):
-    return _FlowGrid(len(aPort), 1.0, len(aPort) // stride).group(aPort, dHyd, burnLength)
-
-
 def _seedSteadyState(aPort, dHyd, burnLength, dx, aThroat, props, pAmbient, pressure, temperature, density, velocity):
     """Start from the normal-burn steady chamber state so the instant-ignition fill transient is skipped."""
     gamma = props.gamma

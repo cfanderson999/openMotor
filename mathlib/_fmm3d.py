@@ -21,10 +21,6 @@ def _as_float32_3d(arr):
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
-def _as_float64_3d(arr):
-    return np.ascontiguousarray(arr, dtype=np.float64)
-
-
 def _as_u8_3d(mask):
     # OpenMotor masks use True for outside/invalid, False for valid voxels.
     return np.ascontiguousarray(mask, dtype=np.uint8)

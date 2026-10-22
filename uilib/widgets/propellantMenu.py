@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QDialog, QMessageBox, QApplication
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, QTimer
 from ..helpers import FLAGS_NO_ICON
 from PyQt6.QtCore import Qt
 
@@ -79,8 +79,14 @@ class PropellantMenu(QDialog):
     def editProp(self):
         prop = self.manager.propellants[self.ui.listWidgetPropellants.currentRow()]
         self.ui.propEditor.loadProperties(prop)
+        QTimer.singleShot(0, self.fitToEditor)  # the editor has its size only once its rows are laid out
         self.toggleButtons(True)
         self.editingPropellant = True
+
+    def fitToEditor(self):
+        """Grow the dialog to the size the editor needs, so that its rows are not squeezed onto one another."""
+        self.layout().activate()
+        self.resize(self.size().expandedTo(self.minimumSizeHint()))
 
     def propEdited(self, propDict):
         # If the name they choose matches an existing propellant, don't apply that change

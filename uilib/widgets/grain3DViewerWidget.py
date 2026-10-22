@@ -1,23 +1,29 @@
 """
 Grain3DViewerWidget
 ===================
-DICOM-style 2×2 orthogonal slice viewer for 3-D FMM grain regression maps.
+DICOM-style orthogonal slice viewer for 3-D FMM grain regression maps, or for the whole motor as one stack.
 
-Layout (2×2 grid)
------------------
-  ┌─────────────┬─────────────┐
-  │  Axial      │  Coronal    │
-  │  XY plane   │  XZ plane   │
-  │  (z slice)  │  (y slice)  │
-  ├─────────────┼─────────────┤
-  │  Sagittal   │  Core       │
-  │  YZ plane   │  legend     │
-  │  (x slice)  │             │
-  └─────────────┴─────────────┘
+Layout
+------
+  ┌───────────────────────────────────────────────────────────────────────┐
+  │ Grain: [..] Mode: [..] Core: [..]  slice                 value at cross │
+  ├─────────────┬─────────────────────────────────────────────────────────┤
+  │  Axial      │  Coronal  (XZ plane, head end left, nozzle end right)    │
+  │  XY plane   ├─────────────────────────────────────────────────────────┤
+  │  (square)   │  Sagittal (YZ plane, head end left, nozzle end right)    │
+  ├─────────────┴─────────────────────────────────────────────────────────┤
+  │ unit   colour bar with ticks (when the core is shaded)                 │
+  │ Burn Time: ────────────────── slider ──────────────────────────  time │
+  └───────────────────────────────────────────────────────────────────────┘
 
-The Core menu shades the burned core of the grain by a quantity from the simulation (pressure, mass flux, Mach number,
-...), one colour per slice of the grain, on a colour range fixed over the whole burn. The legend shows the range and the
-value at the slice the crosshair is on.
+Motors are long and round, so the side views are turned to put the long axis across the window and the axial view is a
+square beside them. The dividers between the four views can be dragged, and "Reset Views" puts everything back.
+
+The Core menu shades the burned core by a quantity from the simulation (pressure, mass flux, Mach number, ...), one colour
+per slice of the grain, on a colour range fixed over the whole burn. The bar under the views gives the colours, and the
+top right gives the value at the slice the crosshair is on.
+
+The Grain menu lists each 3-D grain and "Full Motor", which joins all of them end to end as one stack.
 
 Crosshair interaction
 ---------------------
@@ -25,75 +31,78 @@ Each view has orthogonal crosshair lines.  Clicking/dragging in a view
 updates the out-of-plane slice indices for the other two views:
 
   Axial   click (px, py)  → coronal  Y-val = py,  sagittal X-val = px
-  Coronal click (px, pz)  → axial    X-val = px,  sagittal Z-val = pz   (pz = row)
-  Sagittal click (py, pz) → axial    Y-val = py,  coronal  Z-val = pz   (pz = col)
+  Coronal click (pz, px)  → axial    X-val = px,  sagittal Z-val = pz   (pz = column)
+  Sagittal click (pz, py) → axial    Y-val = py,  coronal  Z-val = pz   (pz = column)
 
   (In axial view   cols=X, rows=Y;   regressionMap[z, y, x])
-  (In coronal view cols=X, rows=Z;   slice = regMap[:, y, :])
-  (In sagittal view cols=Y, rows=Z;  slice = regMap[:, :, x])
+  (In coronal view cols=Z, rows=X;   slice = regMap[:, y, :].T)
+  (In sagittal view cols=Z, rows=Y;  slice = regMap[:, :, x].T)
 
 Scroll-wheel on a view advances the slice shown in *that* view:
   Axial scroll   → change sliceZ
   Coronal scroll → change sliceY
   Sagittal scroll→ change sliceX
 
-Performance notes (targets 256³ at <50 ms/frame)
--------------------------------------------------
-* The regressionMap is only copied once per axis into a contiguous buffer
-  at load time (coronal and sagittal require a copy; axial is a zero-copy
-  view).  Only the three thin 2-D slices are extracted per update.
-* A 16 ms QTimer debounces rapid slider moves so we skip intermediate
-  frames when the slider is dragged quickly.
-* The viridis RGBA LUT is precomputed once at class definition time as a
-  256×4 uint8 array; per-frame rendering is a single numpy array index.
-* NumPy buffer references are pinned as instance variables so QImage never
-  danewes freed memory.
+Performance notes
+-----------------
+* The regression map is held once as a contiguous stack, and only the three thin 2-D slices are extracted per update.
+* A 16 ms QTimer throttles rapid slider moves, so the newest state is drawn while the slider moves rather than only when
+  it stops.
+* The per-slice depth and colour of the core are worked out once per step and metric, and shared by all four views.
+* The 3-D pane draws on a worker thread and only the newest request is drawn.
+* The viridis table is built once at import, so drawing a slice is a single numpy array index.
 """
 
 import numpy as np
-from matplotlib import colormaps as _mpl_colormaps
 
 from PyQt6.QtWidgets import (
     QWidget, QGridLayout, QVBoxLayout, QHBoxLayout,
-    QLabel, QComboBox, QSizePolicy, QFrame, QSlider
+    QLabel, QComboBox, QFrame, QSlider, QSplitter, QPushButton
 )
 from PyQt6.QtCore import Qt, QTimer
 
 from motorlib.grain import Fmm3DGrain
 
 from uilib import coreShading
+from uilib.grainStack import GrainStack
 
 from .sliceViewWidget import SliceViewWidget
-from .coreLegendWidget import CoreLegendWidget
+from .coreColorBar import CoreColorBar
+from .grain3DPane import Core3DPane
 
 
-# ---------------------------------------------------------------------------
-# Precompute the viridis LUT once at import time
-# ---------------------------------------------------------------------------
+_VIRIDIS_LUT: np.ndarray = coreShading.buildLut('viridis')
 
-def _buildLut(name: str = 'viridis') -> np.ndarray:
-    """Return (256, 4) uint8 RGBA array for the named matplotlib colormap."""
-    cmap = _mpl_colormaps[name]
-    indices = np.linspace(0.0, 1.0, 256)
-    rgba_f = cmap(indices)           # (256, 4) float64, 0–1
-    return (rgba_f * 255).astype(np.uint8)
-
-
-_VIRIDIS_LUT: np.ndarray = _buildLut('viridis')
-
-# ---------------------------------------------------------------------------
-# Helper: axis-label titles for the slice views
-# ---------------------------------------------------------------------------
 
 _AXIAL_TITLE    = 'Axial (XY) — Z slice'
 _CORONAL_TITLE  = 'Coronal (XZ) — Y slice'
 _SAGITTAL_TITLE = 'Sagittal (YZ) — X slice'
+_FULL_MOTOR = 'Full Motor'
+_UNIT_COLUMN_WIDTH = 100
+
+
+_SPLITTER_STYLE = (
+    'QSplitter::handle { background-color: rgba(128, 128, 128, 70); }'
+    'QSplitter::handle:hover { background-color: rgba(128, 128, 128, 160); }'
+)
+
+
+def _splitter(orientation, *widgets) -> QSplitter:
+    """A splitter of `widgets`, whose dividers can be dragged to resize them."""
+    splitter = QSplitter(orientation)
+    splitter.setHandleWidth(5)
+    splitter.setChildrenCollapsible(False)
+    splitter.setStyleSheet(_SPLITTER_STYLE)
+    for widget in widgets:
+        splitter.addWidget(widget)
+        splitter.setStretchFactor(splitter.count() - 1, 1)
+    return splitter
 
 
 class Grain3DViewerWidget(QWidget):
-    """2×2 DICOM-style orthographic slice viewer for 3-D FMM grains."""
+    """Orthographic slice viewer for 3-D FMM grains, singly or as the full motor."""
 
-    # Debounce interval for slider updates (ms)
+    # Longest wait before a moving slider is drawn (ms)
     _DEBOUNCE_MS = 16
 
     def __init__(self, parent=None):
@@ -105,14 +114,10 @@ class Grain3DViewerWidget(QWidget):
         self._simResult = None
         # List of (grain_index, grain) for Fmm3DGrain instances only
         self._3dGrains: list = []
-        # Currently displayed grain
-        self._currentGrain: 'Fmm3DGrain | None' = None
-        self._currentGrainIdx: int = -1
-
-        # Regression map for the current grain (3-D array, kept as a reference)
+        # What the views show: the grains in the stack, aft end first, and their joined maps
+        self._stack: 'GrainStack | None' = None
+        # Regression map of the stack (3-D array: slice from the aft end, y, x)
         self._regMap: 'np.ndarray | None' = None
-        # Contiguous C-order copies for the non-contiguous axes
-        self._regMapContiguous: 'np.ndarray | None' = None
         # Max distance in the regression map (for heatmap normalisation)
         self._maxDist: float = 1.0
 
@@ -120,9 +125,6 @@ class Grain3DViewerWidget(QWidget):
         self._sliceZ: int = 0   # axial view shows this Z slice
         self._sliceY: int = 0   # coronal view shows this Y slice
         self._sliceX: int = 0   # sagittal view shows this X slice
-
-        # Current normalised regression distance (from burn-time slider)
-        self._mapDist: float = 0.0
 
         # Grain boundary mask (3-D bool: True = outside cylinder)
         self._mask: 'np.ndarray | None' = None
@@ -134,10 +136,12 @@ class Grain3DViewerWidget(QWidget):
         self._coreKey: 'str | None' = None
         self._shading: 'coreShading.CoreShading | None' = None
         self._step: int = 0
+        self._scene = (None, None)  # what _coreScene was last worked out for, and the result
         self._preferences = None
 
         # True when showing t=0 geometry before a full simulation has been run
         self._previewMode: bool = False
+        self._laidOut: bool = False
 
         # Debounce timer
         self._debounceTimer = QTimer(self)
@@ -185,41 +189,50 @@ class Grain3DViewerWidget(QWidget):
         ctrlBar.addWidget(self._sliceLabel)
 
         ctrlBar.addStretch()
+        self._readoutLabel = QLabel('')
+        self._readoutLabel.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        ctrlBar.addWidget(self._readoutLabel)
+        self._resetButton = QPushButton('Reset Views')
+        self._resetButton.setToolTip('Put the four views back to their starting sizes, positions and angles')
+        self._resetButton.clicked.connect(self._resetViews)
+        ctrlBar.addWidget(self._resetButton)
         outerLayout.addLayout(ctrlBar)
 
-        # 2×2 grid of views
-        grid = QGridLayout()
-        grid.setSpacing(2)
+        # Axial view and 3-D view in the left column, the long coronal and sagittal views in the right, all resizable
+        self._axialView = self._makeView()
+        self._coronalView = self._makeView()
+        self._sagittalView = self._makeView()
+        self._pane3D = Core3DPane()
 
-        self._axialView   = self._makeView(_AXIAL_TITLE)
-        self._coronalView = self._makeView(_CORONAL_TITLE)
-        self._sagittalView = self._makeView(_SAGITTAL_TITLE)
+        self._leftSplit = _splitter(Qt.Orientation.Vertical, self._wrapView(self._axialView, _AXIAL_TITLE), self._pane3D)
+        self._rightSplit = _splitter(Qt.Orientation.Vertical, self._wrapView(self._coronalView, _CORONAL_TITLE),
+                                     self._wrapView(self._sagittalView, _SAGITTAL_TITLE))
+        self._viewSplit = _splitter(Qt.Orientation.Horizontal, self._leftSplit, self._rightSplit)
+        self._viewSplit.setStretchFactor(0, 0)
+        self._leftSplit.setMinimumWidth(160)
+        outerLayout.addWidget(self._viewSplit, stretch=1)
 
-        grid.addWidget(self._wrapView(self._axialView,    _AXIAL_TITLE),    0, 0)
-        grid.addWidget(self._wrapView(self._coronalView,  _CORONAL_TITLE),  0, 1)
-        grid.addWidget(self._wrapView(self._sagittalView, _SAGITTAL_TITLE), 1, 0)
-        self._legend = CoreLegendWidget()
-        grid.addWidget(self._legend,                                         1, 1)
-
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setRowStretch(0, 1)
-        grid.setRowStretch(1, 1)
-
-        outerLayout.addLayout(grid, stretch=1)
-
-        # Burn-time slider (below the grid)
-        sliderBar = QHBoxLayout()
-        sliderBar.setSpacing(4)
-        sliderBar.addWidget(QLabel('Burn Time:'))
+        # Colour bar above the burn-time slider, in the same columns so that both span the same width
+        bottom = QGridLayout()
+        bottom.setHorizontalSpacing(4)
+        bottom.setVerticalSpacing(0)
+        bottom.setColumnMinimumWidth(0, _UNIT_COLUMN_WIDTH)
+        bottom.setColumnMinimumWidth(2, _UNIT_COLUMN_WIDTH)
+        self._unitLabel = QLabel('')
+        self._unitLabel.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        bottom.addWidget(self._unitLabel, 0, 0)
+        self._colorBar = CoreColorBar()
+        bottom.addWidget(self._colorBar, 0, 1)
+        bottom.addWidget(QLabel('Burn Time:'), 1, 0)
         self._timeSlider = QSlider(Qt.Orientation.Horizontal)
         self._timeSlider.setMinimum(0)
         self._timeSlider.setMaximum(0)
-        sliderBar.addWidget(self._timeSlider, stretch=1)
+        bottom.addWidget(self._timeSlider, 1, 1)
         self._timeLabel = QLabel('— s')
         self._timeLabel.setMinimumWidth(60)
-        sliderBar.addWidget(self._timeLabel)
-        outerLayout.addLayout(sliderBar)
+        bottom.addWidget(self._timeLabel, 1, 2)
+        bottom.setColumnStretch(1, 1)
+        outerLayout.addLayout(bottom)
 
         # Connect crosshair signals
         self._axialView.crosshairMoved.connect(self._onAxialCrosshair)
@@ -234,9 +247,9 @@ class Grain3DViewerWidget(QWidget):
         self._showPlaceholderMessage()
 
     @staticmethod
-    def _makeView(title: str) -> SliceViewWidget:
+    def _makeView() -> SliceViewWidget:
         v = SliceViewWidget()
-        v.setMinimumSize(120, 120)
+        v.setMinimumSize(120, 80)
         return v
 
     @staticmethod
@@ -254,19 +267,47 @@ class Grain3DViewerWidget(QWidget):
         vbox.addWidget(view, stretch=1)
         return frame
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._laidOut:
+            self._laidOut = True
+            QTimer.singleShot(0, self._resetLayout)
+
+    def _resetLayout(self) -> None:
+        """The starting sizes of the views: the axial and 3-D views are squares in the left column."""
+        height = self._viewSplit.height()
+        side = max(160, (height - self._leftSplit.handleWidth()) // 2)
+        self._leftSplit.setSizes([side, side])
+        self._rightSplit.setSizes([height, height])
+        self._viewSplit.setSizes([side, max(1, self._viewSplit.width() - side)])
+
+    def _resetViews(self) -> None:
+        """Put the four views back to how they start: their sizes, the slices at the middle, and the 3-D view's angle."""
+        self._resetLayout()
+        self._pane3D.resetView()
+        if self._regMap is not None:
+            sh = self._regMap.shape
+            self._sliceZ, self._sliceY, self._sliceX = sh[0] // 2, sh[1] // 2, sh[2] // 2
+            self._syncCrosshairs()
+            self._renderAll()
+
     def _showPlaceholderMessage(self, msg: str = 'No 3-D grains in this motor'):
         for v in (self._axialView, self._coronalView, self._sagittalView):
             v.setSlice(None, self._mode, _VIRIDIS_LUT, 0.0, 1.0)
         self._sliceLabel.setText(msg)
+        self._readoutLabel.setText('')
+        self._colorBar.clear()
+        self._unitLabel.setText('')
+        self._pane3D.clear()
 
     # ------------------------------------------------------------------
     # Public API – called by ResultsWidget
     # ------------------------------------------------------------------
 
     def setPreferences(self, preferences) -> None:
-        """The preferences that choose the units the legend shows."""
+        """The preferences that choose the units the colour bar and readout show."""
         self._preferences = preferences
-        self._legend.setPreferences(preferences)
+        self._colorBar.setPreferences(preferences)
 
     def showPreview(self, motor) -> None:
         """Show the grain at t=0 after quick results are ready, before a full simulation.
@@ -301,7 +342,9 @@ class Grain3DViewerWidget(QWidget):
         self._grainCombo.blockSignals(True)
         self._grainCombo.clear()
         for i, g in self._3dGrains:
-            self._grainCombo.addItem(f'Grain {i + 1} ({g.geomName})', userData=(i, g))
+            self._grainCombo.addItem(f'Grain {i + 1} ({g.geomName})')
+        if len(self._3dGrains) > 1:
+            self._grainCombo.addItem(_FULL_MOTOR)
         self._grainCombo.blockSignals(False)
 
         # Set up the burn-time slider range
@@ -316,8 +359,7 @@ class Grain3DViewerWidget(QWidget):
             self._grainCombo.setCurrentIndex(0)
             self._loadGrain(0)
         else:
-            self._currentGrain = None
-            self._currentGrainIdx = -1
+            self._stack = None
             self._regMap = None
             self._mask = None
             self._showPlaceholderMessage()
@@ -325,16 +367,12 @@ class Grain3DViewerWidget(QWidget):
     def updateRegression(self, simResult, sliderIndex: int) -> None:
         """Called when the burn-time slider moves.
 
-        Recomputes mapDist for the selected grain and schedules a redraw.
+        Records the step to show and schedules a redraw.
         Also syncs the local slider position.
         """
-        if self._currentGrain is None or simResult is None:
+        if self._stack is None or simResult is None:
             return
 
-        gid = self._currentGrainIdx
-        regDist = simResult.channels['regression'].getPoint(sliderIndex)[gid]
-        diameter = self._currentGrain.props['diameter'].getValue()
-        self._mapDist = regDist / (0.5 * diameter)
         self._step = sliderIndex
 
         # Sync local slider without re-triggering
@@ -345,19 +383,17 @@ class Grain3DViewerWidget(QWidget):
         suffix = '  (preview)' if self._previewMode else ''
         self._timeLabel.setText(f'{currentTime:.3f} s{suffix}')
 
-        # Debounce: restart the timer so rapid moves only trigger one redraw
-        self._debounceTimer.start()
+        # Throttle: while the slider moves, draw the newest state every _DEBOUNCE_MS rather than only when it stops
+        if not self._debounceTimer.isActive():
+            self._debounceTimer.start()
 
     def resetView(self) -> None:
         """Clear all state (called when results are reset)."""
         self._simResult = None
         self._3dGrains = []
-        self._currentGrain = None
-        self._currentGrainIdx = -1
+        self._stack = None
         self._regMap = None
-        self._regMapContiguous = None
         self._mask = None
-        self._mapDist = 0.0
         self._step = 0
         self._shading = None
         self._loadCoreMetrics(None)
@@ -378,25 +414,21 @@ class Grain3DViewerWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _loadGrain(self, comboIndex: int) -> None:
-        if comboIndex < 0 or comboIndex >= len(self._3dGrains):
+        """Show the grain at `comboIndex` of the grain menu, or the full motor, which comes after the grains."""
+        if comboIndex < 0 or comboIndex > len(self._3dGrains) or not self._3dGrains:
             return
-        gid, grain = self._3dGrains[comboIndex]
-        self._currentGrain = grain
-        self._currentGrainIdx = gid
-        regMap = grain.regressionMap  # (mapLength, mapDim, mapDim) float32
-        self._regMap = regMap
-
-        # Pre-build a contiguous C-order copy for the two non-contiguous axes.
-        # At 256³ this is 256³ * 4 bytes ≈ 64 MB – acceptable once per grain.
-        # We use the same array for coronal AND sagittal indexing since both
-        # need a full copy anyway.
-        self._regMapContiguous = np.ascontiguousarray(regMap, dtype=np.float32)
-        self._maxDist = float(np.max(regMap)) if regMap.size > 0 else 1.0
+        if comboIndex == len(self._3dGrains):
+            self._stack = GrainStack.fullMotor(self._3dGrains)
+        else:
+            self._stack = GrainStack.single(*self._3dGrains[comboIndex])
+        self._regMap = self._stack.regressionMap  # (slices, mapDim, mapDim) float32, contiguous
+        self._maxDist = float(np.max(self._regMap)) if self._regMap.size > 0 else 1.0
 
         # Store grain boundary mask (True = outside cylinder)
-        self._mask = grain.mask  # (mapLength, mapDim, mapDim) bool
+        self._mask = self._stack.mask  # (slices, mapDim, mapDim) bool
+        self._pane3D.setVolume(self._regMap, self._mask)
 
-        mapLen, mapDim, _ = regMap.shape
+        mapLen, mapDim, _ = self._regMap.shape
 
         # Initialise crosshairs to the centre of each axis
         self._sliceZ = mapLen  // 2
@@ -425,34 +457,63 @@ class Grain3DViewerWidget(QWidget):
         self._coreCombo.blockSignals(False)
         self._coreKey = keys[index].key if keys[index] is not None else None
 
-    def _coreColors(self) -> 'np.ndarray | None':
-        """Per-slice colours of the chosen metric for the grain and step on show, or None to draw the plain core."""
-        if self._coreKey is None or self._shading is None or self._currentGrainIdx < 0:
-            return None
-        return self._shading.colors(self._coreKey, self._step, self._currentGrainIdx)
+    def _coreScene(self) -> tuple:
+        """The depth and the colour of the core on every slice of the stack, for the step and metric on show. They are kept
+        until one of those changes, as every view needs them."""
+        state = (self._stack, self._shading, self._step, self._coreKey)
+        if self._scene[0] != state:
+            self._scene = (state, (self._depths(), self._coreColors()))
+        return self._scene[1]
 
-    def _updateLegend(self) -> None:
+    def _depths(self) -> np.ndarray:
+        """Normalised regression to draw the core at on every slice of the stack. A result whose burn model reported the
+        regression slice by slice is drawn so; otherwise each grain has the one regression of the simulation's log."""
+        regressions = self._simResult.channels['regression'].getPoint(self._step)
+
+        def perGrain(gid, grain):
+            half = 0.5 * grain.props['diameter'].getValue()
+            reported = self._shading.depths(self._step, gid) if self._shading is not None else None
+            return reported / half if reported is not None else np.full(grain.regressionMap.shape[0], regressions[gid] / half)
+
+        return self._stack.join(perGrain, 0.0)
+
+    def _coreColors(self) -> 'np.ndarray | None':
+        """Per-slice colours of the chosen metric for the stack and step on show, or None to draw the plain core. A grain
+        that has no core to shade at this step is grey."""
+        if self._coreKey is None or self._shading is None or self._stack is None:
+            return None
+        colors = self._stack.join(lambda gid, grain: self._shading.colors(self._coreKey, self._step, gid),
+                                  coreShading.NO_VALUE)
+        reported = any(self._shading.profile(self._step, gid) is not None for gid in self._stack.gids)
+        return colors.astype(np.uint8) if reported else None
+
+    def _metricValues(self, key: str) -> np.ndarray:
+        """The metric on every slice of the stack at the step on show, NaN where there is none."""
+        def perGrain(gid, grain):
+            profile = self._shading.profile(self._step, gid)
+            return profile.metrics[key] if profile is not None else None
+
+        return self._stack.join(perGrain, np.nan)
+
+    def _updateColorBar(self) -> None:
         metric = self._coreCombo.currentData()
         if metric is None or self._shading is None:
-            self._legend.clear()
+            self._colorBar.clear()
+            self._unitLabel.setText('')
             return
-        self._legend.setMetric(metric.name, metric.unit, *self._shading.range(metric.key), coreShading.CORE_LUT)
-        profile = self._shading.profile(self._step, self._currentGrainIdx)
-        sliceZ = int(np.clip(self._sliceZ, 0, self._regMap.shape[0] - 1)) if self._regMap is not None else 0
-        value = profile.metrics[metric.key][sliceZ] if profile is not None else float('nan')
-        self._legend.setReadout('At crosshair (slice {})'.format(sliceZ), value)
+        self._colorBar.setMetric(metric.unit, *self._shading.range(metric.key), coreShading.CORE_LUT)
+        self._unitLabel.setText(self._colorBar.displayUnit)
 
-    def _mapDists(self) -> tuple:
-        """Normalised regression to draw the core at for the axial plane and for the side planes. A result whose burn model
-        reported the regression slice by slice is drawn so, one value per row; otherwise it is the grain's one value."""
-        if self._shading is None or self._currentGrainIdx < 0 or self._regMap is None:
-            return self._mapDist, self._mapDist
-        depths = self._shading.depths(self._step, self._currentGrainIdx)
-        if depths is None:
-            return self._mapDist, self._mapDist
-        normalized = depths / (0.5 * self._currentGrain.props['diameter'].getValue())
+    def _updateReadout(self) -> None:
+        """The value of the shaded metric at the slice the crosshair is on, in the top bar."""
+        metric = self._coreCombo.currentData()
+        if metric is None or self._shading is None or self._stack is None:
+            self._readoutLabel.setText('')
+            return
         z = int(np.clip(self._sliceZ, 0, self._regMap.shape[0] - 1))
-        return normalized[z], normalized[::-1, None]
+        value = self._metricValues(metric.key)[z]
+        self._readoutLabel.setText('{} at slice {}: {} {}'.format(
+            metric.name, z, self._colorBar.format(value), self._colorBar.displayUnit).rstrip())
 
     def _axialCoreColors(self, colors) -> 'np.ndarray | None':
         if colors is None or self._regMap is None:
@@ -477,18 +538,18 @@ class Grain3DViewerWidget(QWidget):
         return self._regMap[z, :, :]
 
     def _getCoronalSlice(self) -> 'np.ndarray | None':
-        """Return regressionMap[::-1, sliceY, :] — Z flipped so head end is top row."""
-        if self._regMapContiguous is None:
+        """Return regressionMap[::-1, sliceY, :].T — Z flipped so the head end is the left column."""
+        if self._regMap is None:
             return None
-        y = np.clip(self._sliceY, 0, self._regMapContiguous.shape[1] - 1)
-        return np.ascontiguousarray(self._regMapContiguous[::-1, y, :])
+        y = np.clip(self._sliceY, 0, self._regMap.shape[1] - 1)
+        return np.ascontiguousarray(self._regMap[::-1, y, :].T)
 
     def _getSagittalSlice(self) -> 'np.ndarray | None':
-        """Return regressionMap[::-1, :, sliceX] — Z flipped so head end is top row."""
-        if self._regMapContiguous is None:
+        """Return regressionMap[::-1, :, sliceX].T — Z flipped so the head end is the left column."""
+        if self._regMap is None:
             return None
-        x = np.clip(self._sliceX, 0, self._regMapContiguous.shape[2] - 1)
-        return np.ascontiguousarray(self._regMapContiguous[::-1, :, x])
+        x = np.clip(self._sliceX, 0, self._regMap.shape[2] - 1)
+        return np.ascontiguousarray(self._regMap[::-1, :, x].T)
 
     def _getAxialMask(self) -> 'np.ndarray | None':
         """Return mask[sliceZ, :, :] — 2D bool."""
@@ -498,53 +559,65 @@ class Grain3DViewerWidget(QWidget):
         return np.asarray(self._mask[z, :, :])
 
     def _getCoronalMask(self) -> 'np.ndarray | None':
-        """Return mask[::-1, sliceY, :] — Z flipped to match coronal slice orientation."""
+        """Return mask[::-1, sliceY, :].T — Z flipped to match coronal slice orientation."""
         if self._mask is None:
             return None
         y = np.clip(self._sliceY, 0, self._mask.shape[1] - 1)
-        return np.asarray(self._mask[::-1, y, :])
+        return np.asarray(self._mask[::-1, y, :].T)
 
     def _getSagittalMask(self) -> 'np.ndarray | None':
-        """Return mask[::-1, :, sliceX] — Z flipped to match sagittal slice orientation."""
+        """Return mask[::-1, :, sliceX].T — Z flipped to match sagittal slice orientation."""
         if self._mask is None:
             return None
         x = np.clip(self._sliceX, 0, self._mask.shape[2] - 1)
-        return np.asarray(self._mask[::-1, :, x])
+        return np.asarray(self._mask[::-1, :, x].T)
 
     # ------------------------------------------------------------------
     # Rendering
     # ------------------------------------------------------------------
 
+    def _distances(self) -> tuple:
+        """The normalised regression to draw the core at, for the axial plane (one value) and for the side planes (one
+        value per column, the slices running left to right from the head end)."""
+        depths = self._coreScene()[0]
+        z = int(np.clip(self._sliceZ, 0, self._regMap.shape[0] - 1))
+        return depths[z], depths[::-1][None, :]
+
+    def _renderAxial(self) -> None:
+        sl = self._getAxialSlice()
+        if sl is not None:
+            self._axialView.setSlice(sl, self._mode, _VIRIDIS_LUT,
+                                     self._distances()[0], self._maxDist,
+                                     self._getAxialMask(), self._axialCoreColors(self._coreScene()[1]))
+            self._updateReadout()
+
+    def _renderCoronal(self) -> None:
+        sl = self._getCoronalSlice()
+        if sl is not None:
+            self._coronalView.setSlice(sl, self._mode, _VIRIDIS_LUT,
+                                       self._distances()[1], self._maxDist,
+                                       self._getCoronalMask(), self._sideCoreColors(self._coreScene()[1]))
+
+    def _renderSagittal(self) -> None:
+        sl = self._getSagittalSlice()
+        if sl is not None:
+            self._sagittalView.setSlice(sl, self._mode, _VIRIDIS_LUT,
+                                        self._distances()[1], self._maxDist,
+                                        self._getSagittalMask(), self._sideCoreColors(self._coreScene()[1]))
+
     def _renderAll(self) -> None:
         """Push new images to all three slice views."""
         if self._regMap is None:
             return
+        self._renderAxial()
+        self._renderCoronal()
+        self._renderSagittal()
+        self._pane3D.setCore(*self._coreScene())
+        self._updateColorBar()
+        self._updateCursor()
 
-        axialDist, sideDist = self._mapDists()
-        mx = self._maxDist
-        mode = self._mode
-        lut = _VIRIDIS_LUT
-
-        axSlice  = self._getAxialSlice()
-        corSlice = self._getCoronalSlice()
-        sagSlice = self._getSagittalSlice()
-        axMask   = self._getAxialMask()
-        corMask  = self._getCoronalMask()
-        sagMask  = self._getSagittalMask()
-
-        colors = self._coreColors()
-        sideColors = self._sideCoreColors(colors)
-        if axSlice is not None:
-            self._axialView.setSlice(axSlice, mode, lut, axialDist, mx, axMask, self._axialCoreColors(colors))
-        if corSlice is not None:
-            self._coronalView.setSlice(corSlice, mode, lut, sideDist, mx, corMask, sideColors)
-        if sagSlice is not None:
-            self._sagittalView.setSlice(sagSlice, mode, lut, sideDist, mx, sagMask, sideColors)
-
-        self._updateLegend()
-        self._updateSliceLabel()
-
-    def _updateSliceLabel(self) -> None:
+    def _updateCursor(self) -> None:
+        """Show the slice of each view in the top bar, and put the 3-D view's cutting planes there."""
         if self._regMap is None:
             self._sliceLabel.setText('slice: —')
             return
@@ -552,26 +625,36 @@ class Grain3DViewerWidget(QWidget):
         self._sliceLabel.setText(
             f'Z={self._sliceZ}/{sh[0]-1}  Y={self._sliceY}/{sh[1]-1}  X={self._sliceX}/{sh[2]-1}'
         )
+        self._pane3D.setCursor(self._sliceZ, self._sliceY, self._sliceX)
 
     # ------------------------------------------------------------------
     # Crosshair sync helpers
     # ------------------------------------------------------------------
 
     def _toDisplayZ(self, realZ: int) -> int:
-        """Convert real Z (0=aft) <-> display row (0=fore/head).  Self-inverse."""
+        """Convert real Z (0=aft) <-> display column (0=fore/head).  Self-inverse."""
         if self._regMap is None:
             return realZ
         return (self._regMap.shape[0] - 1) - realZ
 
+    def _placeAxial(self) -> None:
+        # Axial (XY): columns = X, rows = Y
+        self._axialView.setCrosshair(self._sliceX, self._sliceY)
+
+    def _placeCoronal(self, displayZ: int) -> None:
+        # Coronal (XZ): columns = display_Z (flipped, 0=fore), rows = X
+        self._coronalView.setCrosshair(displayZ, self._sliceX)
+
+    def _placeSagittal(self, displayZ: int) -> None:
+        # Sagittal (YZ): columns = display_Z (flipped, 0=fore), rows = Y
+        self._sagittalView.setCrosshair(displayZ, self._sliceY)
+
     def _syncCrosshairs(self) -> None:
         """Update crosshair positions in all three views without triggering signals."""
         dz = self._toDisplayZ(self._sliceZ)
-        # Axial (XY):   horizontal = Y axis (rows), vertical = X axis (cols)
-        self._axialView.setCrosshair(self._sliceX, self._sliceY)
-        # Coronal (XZ): rows = display_Z (flipped, 0=fore), cols = X
-        self._coronalView.setCrosshair(self._sliceX, dz)
-        # Sagittal (YZ): rows = display_Z (flipped, 0=fore), cols = Y
-        self._sagittalView.setCrosshair(self._sliceY, dz)
+        self._placeAxial()
+        self._placeCoronal(dz)
+        self._placeSagittal(dz)
 
     # ------------------------------------------------------------------
     # Crosshair move handlers
@@ -582,31 +665,32 @@ class Grain3DViewerWidget(QWidget):
         self._sliceX = col
         self._sliceY = row
         dz = self._toDisplayZ(self._sliceZ)
-        self._coronalView.setCrosshair(self._sliceX, dz)
-        self._corSlice = None  # invalidate cache entry
-        self._sagittalView.setCrosshair(self._sliceY, dz)
-        self._sagSlice = None
+        self._placeCoronal(dz)
+        self._placeSagittal(dz)
         # Re-render coronal and sagittal (axial image unchanged)
         self._renderCoronal()
         self._renderSagittal()
+        self._updateCursor()
 
     def _onCoronalCrosshair(self, col: int, row: int) -> None:
-        """Coronal view clicked: col=X, row=display_Z (0=fore); convert to real Z."""
-        self._sliceX = col
-        self._sliceZ = self._toDisplayZ(row)  # symmetric: displayZ -> realZ
-        self._axialView.setCrosshair(self._sliceX, self._sliceY)
-        self._sagittalView.setCrosshair(self._sliceY, row)  # row is already display_Z
+        """Coronal view clicked: col=display_Z (0=fore), row=X; convert to real Z."""
+        self._sliceX = row
+        self._sliceZ = self._toDisplayZ(col)  # symmetric: displayZ -> realZ
+        self._placeAxial()
+        self._placeSagittal(col)  # col is already display_Z
         self._renderAxial()
         self._renderSagittal()
+        self._updateCursor()
 
     def _onSagittalCrosshair(self, col: int, row: int) -> None:
-        """Sagittal view clicked: col=Y, row=display_Z (0=fore); convert to real Z."""
-        self._sliceY = col
-        self._sliceZ = self._toDisplayZ(row)  # symmetric: displayZ -> realZ
-        self._axialView.setCrosshair(self._sliceX, self._sliceY)
-        self._coronalView.setCrosshair(self._sliceX, row)  # row is already display_Z
+        """Sagittal view clicked: col=display_Z (0=fore), row=Y; convert to real Z."""
+        self._sliceY = row
+        self._sliceZ = self._toDisplayZ(col)  # symmetric: displayZ -> realZ
+        self._placeAxial()
+        self._placeCoronal(col)  # col is already display_Z
         self._renderAxial()
         self._renderCoronal()
+        self._updateCursor()
 
     # ------------------------------------------------------------------
     # Scroll-wheel handlers
@@ -625,56 +709,30 @@ class Grain3DViewerWidget(QWidget):
         self._sliceZ += delta
         self._clampSlices()
         dz = self._toDisplayZ(self._sliceZ)
-        self._coronalView.setCrosshair(self._sliceX, dz)
-        self._sagittalView.setCrosshair(self._sliceY, dz)
+        self._placeCoronal(dz)
+        self._placeSagittal(dz)
         self._renderAxial()
-        self._updateSliceLabel()
+        self._updateCursor()
 
     def _onCoronalScroll(self, delta: int) -> None:
         """Scroll in coronal view → advance Y slice."""
         self._sliceY += delta
         self._clampSlices()
         dz = self._toDisplayZ(self._sliceZ)
-        self._axialView.setCrosshair(self._sliceX, self._sliceY)
-        self._sagittalView.setCrosshair(self._sliceY, dz)
+        self._placeAxial()
+        self._placeSagittal(dz)
         self._renderCoronal()
-        self._updateSliceLabel()
+        self._updateCursor()
 
     def _onSagittalScroll(self, delta: int) -> None:
         """Scroll in sagittal view → advance X slice."""
         self._sliceX += delta
         self._clampSlices()
         dz = self._toDisplayZ(self._sliceZ)
-        self._axialView.setCrosshair(self._sliceX, self._sliceY)
-        self._coronalView.setCrosshair(self._sliceX, dz)
+        self._placeAxial()
+        self._placeCoronal(dz)
         self._renderSagittal()
-        self._updateSliceLabel()
-
-    # ------------------------------------------------------------------
-    # Per-view render helpers (only re-render what changed)
-    # ------------------------------------------------------------------
-
-    def _renderAxial(self) -> None:
-        sl = self._getAxialSlice()
-        if sl is not None:
-            self._axialView.setSlice(sl, self._mode, _VIRIDIS_LUT,
-                                     self._mapDists()[0], self._maxDist,
-                                     self._getAxialMask(), self._axialCoreColors(self._coreColors()))
-            self._updateLegend()
-
-    def _renderCoronal(self) -> None:
-        sl = self._getCoronalSlice()
-        if sl is not None:
-            self._coronalView.setSlice(sl, self._mode, _VIRIDIS_LUT,
-                                       self._mapDists()[1], self._maxDist,
-                                       self._getCoronalMask(), self._sideCoreColors(self._coreColors()))
-
-    def _renderSagittal(self) -> None:
-        sl = self._getSagittalSlice()
-        if sl is not None:
-            self._sagittalView.setSlice(sl, self._mode, _VIRIDIS_LUT,
-                                        self._mapDists()[1], self._maxDist,
-                                        self._getSagittalMask(), self._sideCoreColors(self._coreColors()))
+        self._updateCursor()
 
     # ------------------------------------------------------------------
     # Control signal handlers

@@ -7,7 +7,7 @@ burning surface upstream of a slice, and other models can supply their own profi
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import numpy as np
 
@@ -57,7 +57,8 @@ def _pointOrNone(simResult, channel, step):
 
 def getCoreProfiles(simResult, step) -> Dict[int, CoreProfile]:
     """Core profiles of every 3D FMM grain still burning at recorded step `step`, keyed by grain index. A burn model that
-    followed the flow along the bore reports them itself. Otherwise they are worked out for the steady model, in which the gas leaves the propellant at the burn rate of the chamber pressure and flows toward the nozzle,
+    followed the flow along the bore reports them itself. Otherwise they are worked out for the steady model, in which
+    the gas leaves the propellant at the burn rate of the chamber pressure and flows toward the nozzle,
     so the mass flow past a slice is the flow arriving from the grains ahead of it plus the gas made by the part of the
     burning surface at or ahead of that slice. From it:
 

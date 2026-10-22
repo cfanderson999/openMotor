@@ -1,6 +1,7 @@
-solver.py and burn_rate.py are vendored unmodified from srm_1d
-(https://github.com/eJar0k/srm_1d), MIT License, copyright its author.
-The upstream repository declares MIT in pyproject.toml but ships no LICENSE
+The kernels in _kernels.pyx are a Cython port of solver.py and burn_rate.py from srm_1d
+(https://github.com/eJar0k/srm_1d), MIT License, copyright its author. The numerics are those of the
+original, checked against it on the same inputs; the energy diagnostics and ignition-only helpers
+were left out. The upstream repository declares MIT in pyproject.toml but ships no LICENSE
 file; replace this notice with the upstream copyright line once confirmed.
 
 Ma, Y. et al. (2020). A New Erosive Burning Model of Solid Propellant Based

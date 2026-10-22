@@ -26,6 +26,8 @@ else:
     _omp_compile = ['-fopenmp', '-O3']
     _omp_link    = ['-fopenmp']
 
+_opt_compile = ['/O2'] if platform.system() == 'Windows' else ['-O3']
+
 extensions = [
     Extension(
         "mathlib._find_perimeter_cy",
@@ -60,6 +62,21 @@ extensions = [
     Extension(
         "mathlib._levelset_cy",
         ["mathlib/_levelset_cy.pyx"],
+        define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],
+        include_dirs=[numpy.get_include()],
+        extra_compile_args=_omp_compile,
+        extra_link_args=_omp_link,
+    ),
+    Extension(
+        "motorlib.srm1d._kernels",
+        ["motorlib/srm1d/_kernels.pyx"],
+        define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],
+        include_dirs=[numpy.get_include()],
+        extra_compile_args=_opt_compile,
+    ),
+    Extension(
+        "mathlib._raycast_cy",
+        ["mathlib/_raycast_cy.pyx"],
         define_macros=[('NPY_NO_DEPRECATED_API', 'NPY_1_7_API_VERSION')],
         include_dirs=[numpy.get_include()],
         extra_compile_args=_omp_compile,

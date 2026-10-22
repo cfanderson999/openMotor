@@ -38,9 +38,9 @@ def axialImage(colors: np.ndarray, z: int, shape) -> np.ndarray:
     return np.broadcast_to(colors[z], (*shape, 4))
 
 
-def sideImage(colors: np.ndarray, columns: int) -> np.ndarray:
-    """Coronal or sagittal plane, as (slices, columns, 4) with the head end in the top row as the views draw it."""
-    return np.broadcast_to(colors[::-1, None, :], (len(colors), columns, 4))
+def sideImage(colors: np.ndarray, rows: int) -> np.ndarray:
+    """Coronal or sagittal plane, as (rows, slices, 4) with the head end in the leftmost column as the views draw it."""
+    return np.broadcast_to(colors[None, ::-1, :], (rows, len(colors), 4))
 
 
 class CoreShading:
@@ -74,7 +74,8 @@ class CoreShading:
             self._ranges = {}
             for metric in self.metrics:
                 values = [p.metrics[metric.key] for step in sampled for p in self.profiles(int(step)).values()]
-                finite = np.concatenate(values)[np.isfinite(np.concatenate(values))] if values else np.array([])
+                joined = np.concatenate(values) if values else np.array([])
+                finite = joined[np.isfinite(joined)]
                 self._ranges[metric.key] = (float(finite.min()), float(finite.max())) if finite.size else (0.0, 1.0)
         return self._ranges[key]
 
@@ -84,3 +85,23 @@ class CoreShading:
         if profile is None:
             return None
         return sliceColors(profile.metrics[key], *self.range(key))
+
+
+BORE_PLAIN = (96, 112, 176, 255)
+CUT_FACE = (214, 214, 208, 255)
+PROPELLANT = (168, 168, 164, 255)
+END_FACE = (190, 190, 186, 255)
+BACKGROUND = (0, 0, 0, 0)
+SURFACE_COLORS = [BACKGROUND, BORE_PLAIN, CUT_FACE, PROPELLANT, END_FACE]  # by kind of surface: nothing, bore, cut, wall, end
+BORE_KIND = 1
+
+
+def composeScene(kind: np.ndarray, hitSlice: np.ndarray, shade: np.ndarray, boreColors: Optional[np.ndarray]) -> np.ndarray:
+    """(rows, columns, 4) uint8 picture of the surfaces `castCore` found, each lit by its shade. The bore takes the colour of
+    the slice it is on from `boreColors` (one per slice), or a plain one when there are none."""
+    colors = np.array(SURFACE_COLORS, dtype=np.float32)[kind]
+    if boreColors is not None:
+        bore = kind == BORE_KIND
+        colors[bore] = boreColors[hitSlice[bore]].astype(np.float32)
+    colors[..., :3] *= shade[..., None]
+    return colors.clip(0, 255).astype(np.uint8)
