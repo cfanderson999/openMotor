@@ -11,7 +11,7 @@ import pathlib
 import struct
 import tempfile
 from collections import OrderedDict
-from typing import Tuple, List, Union
+from typing import Set, Tuple, List, Union
 
 import numpy as np
 import skfmm
@@ -219,6 +219,31 @@ class Grain(PropertyCollection):
         equivalent."""
         return self
 
+    def _addEndburnerProperty(self) -> None:
+        """Gives the grain an endburner section: solid propellant above the core at the head end, bonded to the grain, that
+        burns only through the open core. It only exists in the 3D simulation, which needs the head end inhibited."""
+        self.props["endburnerLength"] = FloatProperty("Endburner Length", "m", 0, 10)
+
+    def getEndburnerLength(self) -> float:
+        """The length of the grain's endburner section, 0 for a grain that has none."""
+        return self.props["endburnerLength"].getValue() if "endburnerLength" in self.props else 0.0
+
+    def getHiddenProperties(self, simulatedIn3D: bool) -> Set[str]:
+        """Names of the properties an editor should leave out for a motor that is, or is not, simulated in 3D. The endburner
+        section is a 3D property, so it is shown while the motor is simulated in 3D, or while it is set so that a value in
+        use is never out of sight."""
+        if "endburnerLength" in self.props and not simulatedIn3D and self.getEndburnerLength() == 0:
+            return {"endburnerLength"}
+        return set()
+
+    def getLengthString(self, lengthUnit: str = "m") -> str:
+        """Returns the grain's length for display, formatted using the units that is passed in, with the endburner section
+        above the core when the grain has one."""
+        text = self.props["length"].dispFormat(lengthUnit)
+        if self.getEndburnerLength() > 0:
+            text += " + {} endburner".format(self.props["endburnerLength"].dispFormat(lengthUnit))
+        return text
+
     def getExtrudedMask(self, mapDim: int) -> np.ndarray:
         """Returns the cross section mask (True is outside the grain) used when this grain is converted to 3D. The
         default masks everything outside the casting tube."""
@@ -235,7 +260,7 @@ class Grain(PropertyCollection):
 
     def getDetailsString(self, lengthUnit: str = "m") -> str:
         """Returns a short string describing the grain, formatted using the units that is passed in."""
-        return "Length: {}".format(self.props["length"].dispFormat(lengthUnit))
+        return "Length: {}".format(self.getLengthString(lengthUnit))
 
     @abstractmethod
     def simulationSetup(self, config):
@@ -293,6 +318,7 @@ class PerforatedGrain(Grain):
         self.props["inhibitedEnds"] = EnumProperty(
             "Inhibited ends", ["Neither", "Top", "Bottom", "Both"]
         )
+        self._addEndburnerProperty()
         self.wallWeb: float = 0  # Max distance from the core to the wall
         self.cellCenteredMap = False  # Set when a 3D conversion needs the exact pixel scale
 
@@ -319,7 +345,7 @@ class PerforatedGrain(Grain):
         return self._getResampledFaceImage(mapDim)[1]
 
     def convertTo3D(self) -> "Grain":
-        return ConvertedGrain(self, self.props["inhibitedEnds"].getValue())
+        return ConvertedGrain(self, self.props["inhibitedEnds"].getValue(), self.getEndburnerLength())
 
     def getEndPositions(self, regDist: float) -> Tuple[float, float]:
         if self.props["inhibitedEnds"].getValue() == "Neither":  # Neither
@@ -1268,13 +1294,6 @@ class Fmm3DGrain(Grain):
         if cancelCheck and cancelCheck():
             raise _GrainSetupCanceled()
 
-        # # FIXME:
-        # plt.figure(figsize=(16,8))
-        # plt.contourf(self.regressionMap[:,int(self.mapDim/2),:], cmap='viridis', aspect='equal')
-        # plt.colorbar()
-        # plt.gca().set_aspect("equal")
-        # plt.show()
-
         # Only consider non-masked (inside-cylinder) positions for maxDist;
         # filled positions carry an artificial large value that would inflate
         # wallWeb and break burnout detection.
@@ -1844,13 +1863,21 @@ class ConvertedGrain(Fmm3DGrain):
     'getExtrudedCoreMap' and 'getExtrudedMask', so the original is never modified. Created with 'Grain.convertTo3D'.
 
     Callers should check 'getSizeIssue' before setup and 'getGeometryIssue' after it, and keep using the source grain
-    when either reports a problem."""
+    when either reports a problem.
+
+    'endburnerLength' adds a solid section of that length on top of the source grain, at its head end. The core stops where
+    the section starts, so the section is bonded to the grain and burns only where the core opens onto it: the face between
+    the two cannot burn because it is propellant against propellant. The head end must be inhibited. The grain's 'length'
+    stays the length of the source, and the section is extra."""
 
     MAX_VOXELS = 250_000_000
 
-    def __init__(self, source: Grain, inhibitedEnds: str) -> None:
+    def __init__(self, source: Grain, inhibitedEnds: str, endburnerLength: float = 0.0) -> None:
         super().__init__()
         self.source = copy.deepcopy(source)
+        self.endburnerLength = float(endburnerLength)
+        if "endburnerLength" in self.source.props:  # So the source's own descriptions say what this grain is
+            self.source.props["endburnerLength"].setValue(self.endburnerLength)
         self.geomName = source.geomName
         self.props["diameter"].setValue(source.props["diameter"].getValue())
         self.props["length"].setValue(source.props["length"].getValue())
@@ -1867,26 +1894,37 @@ class ConvertedGrain(Fmm3DGrain):
     def generateCoreMap(self) -> None:
         length = self.source.props["length"].getValue()
         self.totalLength = FloatProperty("Length", "m", 0, 10)
-        self.totalLength.setValue(length)
-        self.mapLength = max(1, int(np.ceil(self.lengthToMap(length))))
+        self.totalLength.setValue(length + self.endburnerLength)
+        coreSlices = max(1, int(np.ceil(self.lengthToMap(length))))
+        self.mapLength = max(coreSlices, int(np.ceil(self.lengthToMap(length + self.endburnerLength))))
         shape = (self.mapLength, self.mapDim, self.mapDim)
         self.mask = np.broadcast_to(self.source.getExtrudedMask(self.mapDim)[None, :, :], shape)
         self.mapX = self.mapY = self.mapZ = None
-        self.coreMap = self.source.getExtrudedCoreMap(self.mapLength, self.mapDim)
+        coreMap = self.source.getExtrudedCoreMap(coreSlices, self.mapDim)
+        if self.mapLength > coreSlices:  # The end-burner section is solid propellant above the core, at the head end
+            coreMap = np.concatenate([coreMap, np.ones((self.mapLength - coreSlices, self.mapDim, self.mapDim), dtype=bool)])
+        self.coreMap = coreMap
 
     def getSizeIssue(self, mapDim: int) -> Union[str, None]:
         """Returns a description of why this grain is too large to convert at the given map dimension, or None."""
         diameter = self.props["diameter"].getValue()
         if diameter <= 0:
             return "the grain has no diameter"
-        voxels = mapDim * np.ceil(mapDim * self.props["length"].getValue() / diameter) * mapDim
+        voxels = mapDim * np.ceil(mapDim * (self.props["length"].getValue() + self.endburnerLength) / diameter) * mapDim
         if voxels > self.MAX_VOXELS:
             return "it would need {:.0f} million voxels at 3D map dimension {}".format(voxels / 1e6, mapDim)
         return None
 
     def getGeometryIssue(self, config) -> Union[str, None]:
         """Compares the converted geometry with the source grain after setup. Returns a description of the first
-        disagreement that is larger than the voxel resolution explains, or None when they agree."""
+        disagreement that is larger than the voxel resolution explains, or None when they agree. The end-burner section has
+        no source to compare with, so the grain without it is compared instead."""
+        if self.endburnerLength > 0:
+            if self.props["inhibitedEnds"].getValue() in ("Neither", "Bottom"):
+                return "an end-burner section needs the head end of the grain inhibited"
+            core = ConvertedGrain(self.source, self.props["inhibitedEnds"].getValue())
+            core.simulationSetup(config)
+            return core.getGeometryIssue(config)
         mapDim = config.getProperty("3DmapDim")
         volumeTolerance = max(0.08, 6 / mapDim)
         areaTolerance = max(0.15, 12 / mapDim)
@@ -1923,7 +1961,12 @@ class ConvertedGrain(Fmm3DGrain):
         return None
 
     def getDetailsString(self, lengthUnit: str = "m") -> str:
-        return self.source.getDetailsString(lengthUnit)
+        details = self.source.getDetailsString(lengthUnit)
+        if self.endburnerLength > 0 and "endburnerLength" not in self.source.props:
+            section = FloatProperty("Endburner Length", "m", 0, 10)
+            section.setValue(self.endburnerLength)
+            details += ", endburner {}".format(section.dispFormat(lengthUnit))
+        return details
 
     def getGeometryErrors(self) -> List[SimAlert]:
         return self.source.getGeometryErrors()

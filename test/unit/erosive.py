@@ -8,6 +8,7 @@ import motorlib.propellant
 from motorlib.burnmodels import ErosiveBurn, SteadyBurn
 from motorlib.coreprofiles import ERODING_METRICS, availableMetrics, getCoreProfiles
 from motorlib.grain import ConvertedGrain
+from motorlib.grains import Custom3DGrain
 from motorlib.simResult import SimAlertLevel
 from uilib import coreShading
 
@@ -90,10 +91,43 @@ class TestErosiveSimulation(unittest.TestCase):
         """Pressure a few steps in, while the bore is at its narrowest and the gas flows fastest through it."""
         return result.channels['pressure'].getPoint(3)
 
-    def test_a_long_narrow_bore_starts_at_a_higher_pressure_and_gives_more_impulse_than_without_erosion(self):
+    def test_a_long_narrow_bore_starts_at_a_higher_pressure_than_without_erosion(self):
         self.assertGreater(self._earlyPressure(self.longErosive), 1.5 * self._earlyPressure(self.longPlain))
-        self.assertGreater(self.longErosive.getImpulse(), 1.04 * self.longPlain.getImpulse())
         self.assertGreater(self.longErosive.getPeakMachNumber(), 1.2 * self.widePlain.getPeakMachNumber())
+
+    def test_the_same_propellant_gives_about_the_same_impulse_with_or_without_erosion(self):
+        # Erosion moves the burn earlier and to a higher pressure; the only extra impulse is the thrust coefficient's gain
+        # at that pressure. Thrust taken from the head-end pressure used to give 4% or more on top of that.
+        ratio = self.longErosive.getImpulse() / self.longPlain.getImpulse()
+        self.assertGreater(ratio, 1.0)
+        self.assertLess(ratio, 1.04)
+
+    def test_the_nozzle_sees_a_lower_pressure_than_the_head_end_of_a_fast_bore(self):
+        channels = self.longErosive.channels
+        head, nozzle = np.array(channels['pressure'].getData()), np.array(channels['nozzlePressure'].getData())
+        self.assertTrue(np.all(nozzle <= head * (1 + 1e-9)))
+        self.assertLess(nozzle[3], 0.85 * head[3])
+
+    def test_thrust_and_exit_pressure_follow_the_nozzle_pressure(self):
+        result = self.longErosive
+        channels = result.channels
+        for i in (3, 10, 25):
+            nozzle = channels['nozzlePressure'].getPoint(i)
+            exitPressure = result.motor.nozzle.getExitPressure(result.motor.propellant.getCombustionProperties(nozzle)[2], nozzle)
+            self.assertAlmostEqual(channels['exitPressure'].getPoint(i), exitPressure, delta=1e-6 * exitPressure)
+            expected = result.motor.calcForce(nozzle, channels['dThroat'].getPoint(i - 1), exitPressure)
+            self.assertAlmostEqual(channels['force'].getPoint(i), expected, delta=1e-6 * expected)
+
+    def test_the_throat_erodes_with_the_nozzle_pressure(self):
+        motor = _longBore(erosive=True)
+        motor.nozzle.setProperty('erosionCoeff', 2e-10)
+        channels = motor.runSimulation().channels
+        for i in (3, 10):
+            grown = channels['dThroat'].getPoint(i) - channels['dThroat'].getPoint(i - 1)
+            self.assertAlmostEqual(grown, _TIMESTEP * 2 * 2e-10 * channels['nozzlePressure'].getPoint(i), delta=1e-12)
+
+    def test_a_steady_burn_has_a_single_chamber_pressure_and_no_nozzle_channel(self):
+        self.assertNotIn('nozzlePressure', self.longPlain.channels)
 
     def test_stronger_gas_heat_transfer_means_more_erosion(self):
         stronger = _longBore(erosive=True)
@@ -202,6 +236,68 @@ class TestErosiveCoreProfiles(unittest.TestCase):
         result = _wideBore(erosive=False, convert=True).runSimulation()
         self.assertEqual(result.coreProfiles, [None] * len(result.channels['time'].getData()))
         self.assertEqual(len(availableMetrics(result)), 6)
+
+
+def _coreMesh(diameter, length, segments=48):
+    """A closed cylinder along +Y from 0 to `length`, as (faces, vertices), for the core of a 3D grain."""
+    angle = np.linspace(0.0, 2.0 * np.pi, segments, endpoint=False)
+    ring = np.stack([0.5 * diameter * np.cos(angle), np.zeros(segments), 0.5 * diameter * np.sin(angle)], axis=1)
+    vertices = np.vstack([ring, ring + [0.0, length, 0.0], [[0.0, 0.0, 0.0], [0.0, length, 0.0]]])
+    faces = []
+    for i in range(segments):
+        j = (i + 1) % segments
+        faces += [(i, j, segments + j), (i, segments + j, segments + i), (2 * segments, j, i), (2 * segments + 1, segments + i, segments + j)]
+    return np.array(faces, dtype=np.int32).tolist(), vertices.tolist()
+
+
+def _blindBoreMotor(erosive):
+    """One 3D grain whose core stops short of the head end: the 0.02 m of solid propellant above it burns only through the
+    open core."""
+    motor = _motor(0.03, 0.12, 0.08, 0.012, erosive=erosive, convert=not erosive, grains=0)
+    grain = Custom3DGrain()
+    grain.setProperties({'diameter': 0.08, 'length': 0.02, 'inhibitedEnds': 'Both', 'stlUnit': 'm', 'coreAxis': '+Y',
+                         'mesh': _coreMesh(0.03, 0.12) + ('',), 'massFlux3D': True})
+    motor.grains.append(grain)
+    return motor
+
+
+class TestBlindBoreMotor(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.erosive = _blindBoreMotor(erosive=True).runSimulation()
+        cls.plain = _blindBoreMotor(erosive=False).runSimulation()
+
+    def test_a_motor_with_a_solid_cap_over_its_core_simulates_without_errors(self):
+        self.assertTrue(self.erosive.success)
+        self.assertEqual(self.erosive.getAlertsByLevel(SimAlertLevel.ERROR), [])
+        for name in ('pressure', 'nozzlePressure', 'force', 'massFlux', 'machNumber'):
+            self.assertTrue(np.all(np.isfinite(np.array(self.erosive.channels[name].getData()))), name)
+
+    def test_the_cap_burns_through_the_open_core_and_adds_to_the_initial_kn(self):
+        capped, bare = self.plain, _wideBare()
+        self.assertGreater(capped.getInitialKN(), bare.getInitialKN())
+
+    def test_it_burns_the_same_propellant_as_a_normal_3d_burn(self):
+        self.assertAlmostEqual(self.erosive.getImpulse() / self.plain.getImpulse(), 1, delta=0.05)
+        self.assertAlmostEqual(self.erosive.getPropellantMass(), self.plain.getPropellantMass(), places=9)
+
+    def test_a_converted_grain_with_an_endburner_section_matches_a_custom_grain_with_one(self):
+        motor = _motor(0.03, 0.12, 0.08, 0.012, erosive=True, grains=0)
+        source = motorlib.grains.grainTypes['BATES']()
+        source.setProperties({'diameter': 0.08, 'length': 0.12, 'coreDiameter': 0.03, 'inhibitedEnds': 'Both'})
+        motor.grains.append(ConvertedGrain(source, 'Both', 0.02))
+        converted = motor.runSimulation()
+        self.assertTrue(converted.success)
+        self.assertAlmostEqual(converted.getInitialKN() / self.erosive.getInitialKN(), 1, delta=0.05)
+        self.assertAlmostEqual(converted.getMaxPressure() / self.erosive.getMaxPressure(), 1, delta=0.05)
+        self.assertAlmostEqual(converted.getImpulse() / self.erosive.getImpulse(), 1, delta=0.03)
+
+
+def _wideBare():
+    """The same grain without the cap, for the burning area it does not have."""
+    motor = _blindBoreMotor(erosive=False)
+    motor.grains[0].props['length'].setValue(0.0)
+    return motor.runSimulation()
 
 
 class TestErosiveErrors(unittest.TestCase):

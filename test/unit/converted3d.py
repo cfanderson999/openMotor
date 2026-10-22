@@ -7,6 +7,7 @@ import motorlib.grains
 import motorlib.motor
 import motorlib.propellant
 from motorlib.grain import ConvertedGrain, Fmm3DGrain, getCrossSectionCoordinates
+from motorlib.simResult import SimAlertLevel
 
 _PROPELLANT = {
     'name': 'Test', 'density': 1700,
@@ -340,3 +341,196 @@ class TestAreaCurve(unittest.TestCase):
         levels = np.linspace(0, 1.0, 20)
         self.assertIsNone(converted._getCurvesFromAreas(levels, np.full(20, 1e-3), 1e-3, 1.0))
         self.assertIsNone(converted._getCurvesFromAreas(levels[:3], np.ones(3), 1e-3, 1.0))
+
+
+class TestEndburnerSection(unittest.TestCase):
+    """A converted grain can carry a solid end-burner section above its core, bonded to the grain, so it burns only through the
+    open core."""
+    CAP = 0.02
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = _grain('BATES', coreDiameter=0.03)
+        cls.plain = ConvertedGrain(cls.source, 'Both')
+        cls.capped = ConvertedGrain(cls.source, 'Both', cls.CAP)
+        for grain in (cls.plain, cls.capped):
+            grain.simulationSetup(_config())
+
+    def test_the_section_adds_its_length_and_volume_above_the_core(self):
+        voxel = _DIAMETER / _MAP_DIM
+        self.assertAlmostEqual(self.capped.getInitialLength(), _LENGTH + self.CAP, places=9)
+        extraSlices = self.capped.coreMap.shape[0] - self.plain.coreMap.shape[0]
+        self.assertAlmostEqual(extraSlices * voxel, self.CAP, delta=voxel)
+        capVolume = np.pi / 4 * _DIAMETER ** 2 * self.CAP
+        added = self.capped.getVolumeAtRegression(0) - self.plain.getVolumeAtRegression(0)
+        self.assertAlmostEqual(added / capVolume, 1, delta=2 * voxel / self.CAP)
+        self.assertAlmostEqual(self.capped.getGrainBoundingVolume(), np.pi / 4 * _DIAMETER ** 2 * (_LENGTH + self.CAP))
+
+    def test_the_core_is_unchanged_below_a_solid_section(self):
+        coreSlices = self.plain.coreMap.shape[0]
+        np.testing.assert_array_equal(self.capped.coreMap[:coreSlices], self.plain.coreMap)
+        self.assertTrue(self.capped.coreMap[coreSlices:].all())
+
+    def test_the_section_burns_only_where_the_core_opens_onto_it(self):
+        from motorlib.srm1d.adapter import burnbackFromFmm3dGrains
+        capped = burnbackFromFmm3dGrains([self.capped]).slabBurnArea().sum()
+        plain = burnbackFromFmm3dGrains([self.plain]).slabBurnArea().sum()
+        coreArea = np.pi / 4 * 0.03 ** 2
+        self.assertAlmostEqual((capped - plain) / coreArea, 1, delta=0.25)
+
+    def test_the_head_end_must_be_inhibited(self):
+        for ends in ('Neither', 'Bottom'):
+            grain = ConvertedGrain(self.source, ends, self.CAP)
+            grain.simulationSetup(_config())
+            self.assertIn('inhibited', grain.getGeometryIssue(_config()))
+        self.assertIsNone(self.capped.getGeometryIssue(_config()))
+
+    def test_the_details_mention_the_section(self):
+        self.assertNotIn('endburner', self.plain.getDetailsString('mm'))
+        self.assertIn('endburner', self.capped.getDetailsString('mm'))
+
+    def test_a_section_makes_the_motor_hold_and_deliver_more(self):
+        capped = _motor([ConvertedGrain(self.source, 'Both', self.CAP)], convert=False).runSimulation()
+        plain = _motor([ConvertedGrain(self.source, 'Both')], convert=False).runSimulation()
+        self.assertTrue(capped.success and plain.success)
+        self.assertGreater(capped.getPropellantMass(), plain.getPropellantMass())
+        self.assertGreater(capped.getImpulse(), plain.getImpulse())
+        self.assertGreater(capped.getInitialKN(), plain.getInitialKN())
+
+
+class TestEndburnerProperty(unittest.TestCase):
+    """The endburner length of a perforated grain is a 3D property: saved with the grain, shown by editors only while the motor is
+    simulated in 3D, and refused by a 2D simulation."""
+
+    def test_a_grain_has_no_endburner_by_default_and_files_from_before_the_property_still_load(self):
+        grain = _grain('BATES', coreDiameter=0.03)
+        self.assertEqual(grain.getProperty('endburnerLength'), 0)
+        saved = grain.getProperties()
+        self.assertIn('endburnerLength', saved)
+        del saved['endburnerLength']
+        older = motorlib.grains.grainTypes['BATES']()
+        older.setProperties(saved)
+        self.assertEqual(older.getProperty('endburnerLength'), 0)
+
+    def test_the_value_survives_a_save_and_load(self):
+        grain = _grain('BATES', coreDiameter=0.03, endburnerLength=0.02)
+        again = motorlib.grains.grainTypes['BATES']()
+        again.setProperties(grain.getProperties())
+        self.assertEqual(again.getProperty('endburnerLength'), 0.02)
+
+    def test_editors_hide_it_unless_the_motor_is_simulated_in_3d_or_the_value_is_set(self):
+        grain = _grain('BATES', coreDiameter=0.03)
+        self.assertEqual(grain.getHiddenProperties(False), {'endburnerLength'})
+        self.assertEqual(grain.getHiddenProperties(True), set())
+        grain.setProperty('endburnerLength', 0.02)
+        self.assertEqual(grain.getHiddenProperties(False), set())
+        self.assertEqual(motorlib.grains.grainTypes['End Burner']().getHiddenProperties(False), set())
+
+    def test_the_config_reports_whether_the_grains_are_simulated_in_3d(self):
+        config = _config()
+        self.assertFalse(config.simulatesIn3D())
+        config.setProperty('convertTo3D', True)
+        self.assertTrue(config.simulatesIn3D())
+        config.setProperty('convertTo3D', False)
+        config.setProperty('erosiveBurning', True)
+        self.assertTrue(config.simulatesIn3D())
+
+    def test_conversion_carries_the_section_to_the_3d_grain(self):
+        converted = _grain('BATES', coreDiameter=0.03, endburnerLength=0.02).convertTo3D()
+        self.assertIsInstance(converted, ConvertedGrain)
+        self.assertEqual(converted.endburnerLength, 0.02)
+
+    def test_a_two_dimensional_simulation_refuses_a_grain_with_a_section(self):
+        result = _motor([_grain('BATES', coreDiameter=0.03, endburnerLength=0.02)], convert=False).runSimulation()
+        errors = result.getAlertsByLevel(SimAlertLevel.ERROR)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('3D', errors[0].description)
+        self.assertEqual(errors[0].location, 'Grain 1')
+
+    def test_the_converted_simulation_burns_the_section(self):
+        capped = _motor([_grain('BATES', coreDiameter=0.03, endburnerLength=0.02)], convert=True).runSimulation()
+        plain = _motor([_grain('BATES', coreDiameter=0.03)], convert=True).runSimulation()
+        self.assertTrue(capped.success)
+        self.assertGreater(capped.getPropellantMass(), plain.getPropellantMass())
+        self.assertGreater(capped.getImpulse(), plain.getImpulse())
+
+    def test_a_section_over_a_grain_with_an_open_head_end_is_refused_with_the_reason(self):
+        motor = _motor([_grain('BATES', coreDiameter=0.03, inhibitedEnds='Neither', endburnerLength=0.02)], convert=True)
+        errors = motor.runSimulation().getAlertsByLevel(SimAlertLevel.ERROR)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('head end', errors[0].description)
+        self.assertIn('inhibited', errors[0].description)
+
+
+class TestEndburnerAccounting(unittest.TestCase):
+    """The section counts in the grain's length, the propellant mass and length, the volume loading and the quick results."""
+    CAP = 0.02
+
+    def test_every_grain_type_names_the_section_in_its_details_when_it_has_one(self):
+        for geomName, props in (('BATES', dict(coreDiameter=0.03)), ('Conical', dict(forwardCoreDiameter=0.04, aftCoreDiameter=0.02)),
+                                ('Finocyl', {})):
+            grain = _grain(geomName, endburnerLength=self.CAP, **props)
+            self.assertIn('endburner', grain.getDetailsString('mm'), geomName)
+            self.assertIn('20 mm endburner', grain.getDetailsString('mm'), geomName)
+            self.assertNotIn('endburner', _grain(geomName, **props).getDetailsString('mm'), geomName)
+
+    def test_a_converted_grain_names_the_section_once(self):
+        converted = _grain('BATES', coreDiameter=0.03, endburnerLength=self.CAP).convertTo3D()
+        self.assertEqual(converted.getDetailsString('mm').count('endburner'), 1)
+
+    def test_a_motor_reports_whether_any_grain_has_a_section(self):
+        self.assertFalse(_motor([_grain('BATES', coreDiameter=0.03)], convert=False).hasEndburnerSections())
+        self.assertTrue(_motor([_grain('BATES', coreDiameter=0.03), _grain('BATES', coreDiameter=0.03, endburnerLength=self.CAP)],
+                               convert=False).hasEndburnerSections())
+
+    def test_the_quick_results_count_the_section_as_the_simulation_does(self):
+        motor = _motor([_grain('BATES', coreDiameter=0.03, endburnerLength=self.CAP)], convert=False)
+        grains = list(motor.grains)
+        quick = motor.getQuickResults()
+        simulated = _motor([_grain('BATES', coreDiameter=0.03, endburnerLength=self.CAP)], convert=True).runSimulation()
+        voxel = _DIAMETER / _MAP_DIM
+        self.assertAlmostEqual(quick['length'], _LENGTH + self.CAP, delta=voxel)
+        self.assertAlmostEqual(quick['length'], simulated.getPropellantLength(), places=9)
+        self.assertAlmostEqual(quick['propellantMass'] / simulated.getPropellantMass(), 1, delta=0.002)
+        self.assertAlmostEqual(quick['volumeLoading'], simulated.getVolumeLoading(), delta=0.2)
+        self.assertAlmostEqual(quick['initialKn'] / simulated.getInitialKN(), 1, delta=0.02)
+        self.assertEqual(motor.grains, grains)  # the motor keeps its own grains
+        self.assertFalse(any(isinstance(g, Fmm3DGrain) for g in motor.grains))
+
+    def test_the_quick_results_are_larger_than_the_same_grain_without_the_section(self):
+        with_section = _motor([_grain('BATES', coreDiameter=0.03, endburnerLength=self.CAP)], convert=False).getQuickResults()
+        without = _motor([_grain('BATES', coreDiameter=0.03)], convert=False).getQuickResults()
+        self.assertAlmostEqual(with_section['length'] - without['length'], self.CAP, delta=_DIAMETER / _MAP_DIM)
+        capVolume = np.pi / 4 * _DIAMETER ** 2 * self.CAP
+        self.assertAlmostEqual((with_section['propellantMass'] - without['propellantMass']) / (1700 * capVolume), 1, delta=0.1)
+        self.assertGreater(with_section['initialKn'], without['initialKn'])
+
+    def test_the_simulated_propellant_mass_is_the_core_grain_plus_the_section(self):
+        capped = _motor([_grain('BATES', coreDiameter=0.03, endburnerLength=self.CAP)], convert=True).runSimulation()
+        plain = _motor([_grain('BATES', coreDiameter=0.03)], convert=True).runSimulation()
+        expected = 1700 * np.pi / 4 * _DIAMETER ** 2 * self.CAP
+        self.assertAlmostEqual((capped.getPropellantMass() - plain.getPropellantMass()) / expected, 1, delta=0.1)
+        self.assertAlmostEqual(capped.getPropellantLength() - plain.getPropellantLength(), self.CAP, delta=_DIAMETER / _MAP_DIM)
+
+    def test_the_motor_for_the_preview_holds_set_up_3d_versions_of_the_grains_with_a_section(self):
+        motor = _motor([_grain('BATES', coreDiameter=0.03), _grain('BATES', coreDiameter=0.03, endburnerLength=self.CAP)], convert=False)
+        grains = list(motor.grains)
+        shown = motor.withEndburnerGrainsConverted()
+        self.assertFalse(shown.hasEndburnerSections())
+        shown.getQuickResults()
+        self.assertIs(shown.grains[0], grains[0])  # a grain without a section is the motor's own
+        self.assertNotIsInstance(shown.grains[0], Fmm3DGrain)  # a grain without a section stays as it was
+        self.assertIsInstance(shown.grains[1], ConvertedGrain)
+        self.assertIsNotNone(shown.grains[1].regressionMap)
+        self.assertAlmostEqual(shown.grains[1].regressionMap.shape[0] * _DIAMETER / _MAP_DIM, _LENGTH + self.CAP, delta=_DIAMETER / _MAP_DIM)
+        self.assertEqual(motor.grains, grains)
+
+    def test_a_conical_grain_carries_a_section_too(self):
+        props = dict(forwardCoreDiameter=0.04, aftCoreDiameter=0.02)
+        capped = _motor([_grain('Conical', endburnerLength=self.CAP, **props)], convert=True).runSimulation()
+        plain = _motor([_grain('Conical', **props)], convert=True).runSimulation()
+        self.assertTrue(capped.success)
+        expected = 1700 * np.pi / 4 * _DIAMETER ** 2 * self.CAP
+        self.assertAlmostEqual((capped.getPropellantMass() - plain.getPropellantMass()) / expected, 1, delta=0.1)
+        self.assertAlmostEqual(capped.getPropellantLength() - plain.getPropellantLength(), self.CAP, delta=_DIAMETER / _MAP_DIM)
+        self.assertIn('20 mm endburner', _grain('Conical', endburnerLength=self.CAP, **props).getDetailsString('mm'))

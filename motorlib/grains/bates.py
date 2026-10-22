@@ -29,7 +29,7 @@ class BatesGrain(PerforatedGrain):
         return outer - inner
 
     def getDetailsString(self, lengthUnit='m'):
-        return 'Length: {}, Core: {}'.format(self.props['length'].dispFormat(lengthUnit),
+        return 'Length: {}, Core: {}'.format(self.getLengthString(lengthUnit),
                                              self.props['coreDiameter'].dispFormat(lengthUnit))
 
     def getGeometryErrors(self):

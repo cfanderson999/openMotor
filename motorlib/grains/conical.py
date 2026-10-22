@@ -18,6 +18,7 @@ class ConicalGrain(Grain):
         self.props['forwardCoreDiameter'] = FloatProperty('Forward Core Diameter', 'm', 0, maximumRefDiameter)
         self.props['aftCoreDiameter'] = FloatProperty('Aft Core Diameter', 'm', 0, maximumRefDiameter)
         self.props['inhibitedEnds'] = EnumProperty('Inhibited ends', ['Neither', 'Top', 'Bottom', 'Both'])
+        self._addEndburnerProperty()
 
     def getExtrudedCoreMap(self, mapLength, mapDim):
         """The core is a frustum, so its radius is interpolated from the aft end (index 0) to the forward end."""
@@ -29,7 +30,7 @@ class ConicalGrain(Grain):
         return radiusSquared[None, :, :] >= (coreRadius ** 2)[:, None, None]
 
     def convertTo3D(self):
-        return ConvertedGrain(self, self.props['inhibitedEnds'].getValue())
+        return ConvertedGrain(self, self.props['inhibitedEnds'].getValue(), self.getEndburnerLength())
 
     def isCoreInverted(self):
         """A simple helper that returns 'true' if the core's foward diameter is larger than its aft diameter"""
@@ -199,7 +200,7 @@ class ConicalGrain(Grain):
 
     def getDetailsString(self, lengthUnit='m'):
         """Returns a short string describing the grain, formatted using the units that is passed in"""
-        return 'Length: {}'.format(self.props['length'].dispFormat(lengthUnit))
+        return 'Length: {}'.format(self.getLengthString(lengthUnit))
 
     def getInitialLength(self):
         return self.props['length'].getValue()

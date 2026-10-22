@@ -11,6 +11,12 @@ from mathlib._levelset import advance_level_set
 from mathlib._march import contour_length_by_slice, extend_into_mask, marching_area_pixels_by_layer
 
 
+# A slab of solid propellant, such as the cap of a blind bore, has no open cross section and carries no flow. The flow solver
+# divides by the port area and the hydraulic diameter of every cell, so those slabs get a negligible bore instead of zero.
+MIN_PORT_AREA = 1e-9  # m^2
+MIN_HYDRAULIC_DIAMETER = 1e-4  # m
+
+
 class BurnbackGrid:
     def __init__(self, phi: np.ndarray, valid: np.ndarray, voxel: float, advanceMethod: str = 'narrow-band', wallRing=None):
         """`phi` is a signed distance-like field, positive in propellant; `valid` is True inside the casting cylinder.
@@ -121,9 +127,9 @@ class BurnbackGrid:
         """(aPort, dHyd, burnLength) per slab, SI units. burnLength is burning area per unit axial length."""
         openArea = self.voidArea()
         perimeter = self.wettedPerimeter()
-        aPort = 0.5 * (openArea[:-1] + openArea[1:])
+        aPort = np.maximum(0.5 * (openArea[:-1] + openArea[1:]), MIN_PORT_AREA)
         wetted = 0.5 * (perimeter[:-1] + perimeter[1:])
         casting = float(np.count_nonzero(self.valid[0])) * self.voxel ** 2
         castingPerimeter = 2.0 * np.sqrt(np.pi * casting)
         dHyd = np.where(wetted > 0, 4.0 * aPort / np.maximum(wetted, 1e-12), 4.0 * aPort / castingPerimeter)
-        return aPort, dHyd, self.slabBurnArea() / self.voxel
+        return aPort, np.maximum(dHyd, MIN_HYDRAULIC_DIAMETER), self.slabBurnArea() / self.voxel

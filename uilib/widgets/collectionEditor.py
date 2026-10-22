@@ -65,9 +65,12 @@ class CollectionEditor(QWidget):
     def setPreferences(self, pref):
         self.preferences = pref
 
-    def loadProperties(self, obj):
+    def loadProperties(self, obj, hidden=()):
+        """Shows a row for each property of `obj` except those named in `hidden`, which keep the value they have."""
         self.cleanup()
         for prop in obj.props:
+            if prop in hidden:
+                continue
             self.propertyEditors[prop] = PropertyEditor(self, obj.props[prop], self.preferences)
             self.propertyEditors[prop].valueChanged.connect(self.propertyUpdate)
             label = QLabel('{}:'.format(obj.props[prop].dispName))

@@ -33,7 +33,7 @@ class StarGrain(FmmGrain):
             self.coreMap[np.logical_and(vect, near)] = 0
 
     def getDetailsString(self, lengthUnit='m'):
-        return 'Length: {}, Points: {}'.format(self.props['length'].dispFormat(lengthUnit),
+        return 'Length: {}, Points: {}'.format(self.getLengthString(lengthUnit),
                                                self.props['numPoints'].getValue())
 
     def getGeometryErrors(self):

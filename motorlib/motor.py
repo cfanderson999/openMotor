@@ -12,7 +12,7 @@ from .grains import EndBurningGrain, grainTypes
 from .nozzle import Nozzle
 from .propellant import Propellant
 from .properties import BooleanProperty, FloatProperty, IntProperty, PropertyCollection
-from .simResult import SimAlert, SimAlertLevel, SimAlertType, SimulationResult
+from .simResult import LogChannel, SimAlert, SimAlertLevel, SimAlertType, SimulationResult
 from .grain import Fmm3DGrain, Grain, _GrainSetupCanceled
 from .burnmodels import SteadyBurn
 
@@ -65,6 +65,10 @@ class MotorConfig(PropertyCollection):
         self.props["erosiveRoughness"].setValue(32e-6)
         self.props["erosiveCellLength"] = FloatProperty("Erosive Burning Flow Cell Length", "m", 5e-4, 0.1)
         self.props["erosiveCellLength"].setValue(5e-3)
+
+    def simulatesIn3D(self) -> bool:
+        """Whether the motor's grains are simulated as 3D FMM grains, which erosive burning implies."""
+        return bool(self.getProperty("convertTo3D") or self.getProperty("erosiveBurning"))
 
 
 class Motor:
@@ -260,6 +264,20 @@ class Motor:
                         "Grain {}".format(gid + 1),
                     )
                 )
+            if grain.getEndburnerLength() > 0:
+                reason = dict(self.conversionNotes).get(gid)
+                if reason is None:
+                    aText = (
+                        "{} grain has an endburner section, which only exists in the 3D simulation. Simulate the grains "
+                        "with 3D FMM or set its endburner length to 0".format(grain.geomName)
+                    )
+                else:
+                    aText = "{} grain has an endburner section but could not be converted to 3D because {}".format(
+                        grain.geomName, reason
+                    )
+                simRes.addAlert(
+                    SimAlert(SimAlertLevel.ERROR, SimAlertType.CONSTRAINT, aText, "Grain {}".format(gid + 1))
+                )
             for alert in grain.getGeometryErrors():
                 alert.location = "Grain {}".format(gid + 1)
                 simRes.addAlert(alert)
@@ -424,6 +442,9 @@ class Motor:
         simRes.channels["time"].addData(0)
         simRes.channels["kn"].addData(step.kn)
         simRes.channels["pressure"].addData(step.pressure)
+        if step.nozzlePressure is not None:  # Only a model that solves the pressure along the bore has one to report
+            simRes.channels["nozzlePressure"] = LogChannel("Nozzle Pressure", float, "Pa")
+            simRes.channels["nozzlePressure"].addData(step.nozzlePressure)
         simRes.channels["force"].addData(0)
         simRes.channels["mass"].addData(step.mass)
         simRes.channels["volumeLoading"].addData(step.volumeLoading)
@@ -451,6 +472,11 @@ class Motor:
             simRes.channels["kn"].addData(step.kn)
             pressure = step.pressure
             simRes.channels["pressure"].addData(pressure)
+            # The nozzle sees the pressure at its own entrance, which is the chamber pressure unless the model resolves a
+            # pressure drop along the bore
+            nozzlePressure = pressure if step.nozzlePressure is None else step.nozzlePressure
+            if "nozzlePressure" in simRes.channels:
+                simRes.channels["nozzlePressure"].addData(nozzlePressure)
 
             # Calculate Mach Number
             perGrainMachNumber = step.machNumber
@@ -460,24 +486,22 @@ class Motor:
             simRes.coreProfiles.append(step.coreProfiles)
 
             # Calculate Exit Pressure
-            _, _, gamma, _, _ = self.propellant.getCombustionProperties(pressure)
-            exitPressure = self.nozzle.getExitPressure(gamma, pressure)
+            _, _, gamma, _, _ = self.propellant.getCombustionProperties(nozzlePressure)
+            exitPressure = self.nozzle.getExitPressure(gamma, nozzlePressure)
             simRes.channels["exitPressure"].addData(exitPressure)
 
             # Calculate force
-            force = self.calcForce(
-                simRes.channels["pressure"].getLast(), dThroat, exitPressure
-            )
+            force = self.calcForce(nozzlePressure, dThroat, exitPressure)
             simRes.channels["force"].addData(force)
 
             simRes.channels["time"].addData(simRes.channels["time"].getLast() + dTime)
 
             # Calculate any slag deposition or erosion of the throat
-            if pressure == 0:
+            if nozzlePressure == 0:
                 slagRate = 0
             else:
-                slagRate = (1 / pressure) * self.nozzle.getProperty("slagCoeff")
-            erosionRate = pressure * self.nozzle.getProperty("erosionCoeff")
+                slagRate = (1 / nozzlePressure) * self.nozzle.getProperty("slagCoeff")
+            erosionRate = nozzlePressure * self.nozzle.getProperty("erosionCoeff")
             change = dTime * ((-2 * slagRate) + (2 * erosionRate))
             simRes.channels["dThroat"].addData(dThroat + change)
 
@@ -502,7 +526,26 @@ class Motor:
             return ErosiveBurn(self)
         return SteadyBurn(self)
 
+    def hasEndburnerSections(self) -> bool:
+        """Whether any grain has an endburner section, which only the 3D simulation can account for."""
+        return any(g.getEndburnerLength() > 0 for g in self.grains)
+
+    def withEndburnerGrainsConverted(self):
+        """A motor with this one's propellant, nozzle and config that holds the 3D FMM version of every grain with an
+        endburner section in its place, so that the quick results and the 3D preview count the section's length, mass and
+        burning area. The motor's own grains are left as they are."""
+        quick = Motor()
+        quick.propellant, quick.nozzle, quick.config = self.propellant, self.nozzle, self.config
+        quick.grains = [
+            g.convertTo3D() if g.getEndburnerLength() > 0 else g
+            for g in self.grains
+        ]
+        return quick
+
     def getQuickResults(self, cancelCheck=None, statusCb=None):
+        if self.hasEndburnerSections():
+            return self.withEndburnerGrainsConverted().getQuickResults(cancelCheck, statusCb)
+
         results = {
             "volumeLoading": 0,
             "initialKn": 0,

@@ -61,7 +61,7 @@ class RodTubeGrain(PerforatedGrain):
         return tubeArea + rodArea
 
     def getDetailsString(self, lengthUnit='m'):
-        return 'Length: {}, Core: {}, Rod: {}'.format(self.props['length'].dispFormat(lengthUnit),
+        return 'Length: {}, Core: {}, Rod: {}'.format(self.getLengthString(lengthUnit),
                                                       self.props['coreDiameter'].dispFormat(lengthUnit),
                                                       self.props['rodDiameter'].dispFormat(lengthUnit))
 

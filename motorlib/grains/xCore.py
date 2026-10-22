@@ -23,7 +23,7 @@ class XCore(FmmGrain):
         self.coreMap[np.logical_and(np.abs(self.mapX) < slotWidth/2, np.abs(self.mapY) < slotLength)] = 0
 
     def getDetailsString(self, lengthUnit='m'):
-        return 'Length: {}, Slots: {} by {}'.format(self.props['length'].dispFormat(lengthUnit),
+        return 'Length: {}, Slots: {} by {}'.format(self.getLengthString(lengthUnit),
                                                     self.props['slotWidth'].dispFormat(lengthUnit),
                                                     self.props['slotLength'].dispFormat(lengthUnit))
 

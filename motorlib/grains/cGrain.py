@@ -26,7 +26,7 @@ class CGrain(FmmGrain):
         self.coreMap[np.logical_and(np.abs(self.mapY) < slotWidth / 2, self.mapX > slotOffset)] = 0
 
     def getDetailsString(self, lengthUnit='m'):
-        return 'Length: {}'.format(self.props['length'].dispFormat(lengthUnit))
+        return 'Length: {}'.format(self.getLengthString(lengthUnit))
 
     def getGeometryErrors(self):
         errors = super().getGeometryErrors()

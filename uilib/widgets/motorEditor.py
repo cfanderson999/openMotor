@@ -48,9 +48,9 @@ class MotorEditor(CollectionEditor):
                 self.propertyEditors['stlUnit'].getValue()
             )
 
-    def loadObject(self, obj):
+    def loadObject(self, obj, hidden=()):
         self.objType = type(obj)
-        self.loadProperties(obj)
+        self.loadProperties(obj, hidden)
 
         if issubclass(self.objType, motorlib.grain.PerforatedGrain):
             self.grainPreview.show()

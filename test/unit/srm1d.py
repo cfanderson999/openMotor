@@ -6,6 +6,7 @@ import numpy as np
 from motorlib.grains import Finocyl
 
 from motorlib.srm1d import FlowProperties, advanceFlow, BurnbackGrid, BurnSimulation, runBurn, chooseStride
+from motorlib.srm1d.burnback import MIN_HYDRAULIC_DIAMETER, MIN_PORT_AREA
 from motorlib.srm1d.quasisteady import advanceQuasiSteady
 from motorlib.srm1d.coupled import _seedSteadyState, _FlowGrid
 from motorlib.srm1d.coupled import MA2020_VALIDATED
@@ -258,6 +259,60 @@ class TestCoupledBurn(unittest.TestCase):
         fine = runBurn(BurnbackGrid(phi, valid, voxel), flowStride=1, **kwargs)
         coarse = runBurn(BurnbackGrid(phi, valid, voxel), flowStride=chooseStride(_SLICES - 1, 5 * voxel, voxel), **kwargs)
         self.assertAlmostEqual(coarse.headPressure[-1] / fine.headPressure[-1], 1.0, delta=0.01)
+
+
+_CAP_SLICES = 6
+
+
+def _blindBoreGrid():
+    """The cylinder bore with a solid cap of `_CAP_SLICES` slices at the head end, which burns where the bore opens onto it."""
+    phi, valid, voxel = _cylinderField()
+    propellant = phi > 0
+    propellant[:_CAP_SLICES] = True
+    return BurnbackGrid.fromMask(propellant, valid, voxel), voxel
+
+
+class TestBlindBore(unittest.TestCase):
+    def test_slabs_without_a_bore_get_a_negligible_one_so_the_flow_stays_finite(self):
+        grid, _ = _blindBoreGrid()
+        aPort, dHyd, burnLength = grid.flowGeometry()
+        for values in (aPort, dHyd, burnLength):
+            self.assertTrue(np.all(np.isfinite(values)))
+        self.assertTrue(np.all(aPort >= MIN_PORT_AREA))
+        self.assertTrue(np.all(dHyd >= MIN_HYDRAULIC_DIAMETER))
+        solid = slice(0, _CAP_SLICES - 2)
+        np.testing.assert_allclose(aPort[solid], MIN_PORT_AREA)
+        np.testing.assert_allclose(dHyd[solid], MIN_HYDRAULIC_DIAMETER)
+        self.assertEqual(float(burnLength[solid].sum()), 0.0)
+        self.assertGreater(float(burnLength[_CAP_SLICES - 2:_CAP_SLICES + 1].sum()), 0.0)
+
+    def test_the_bore_opening_onto_the_cap_burns_the_cap_in_place_of_the_wall_it_covers(self):
+        grid, voxel = _blindBoreGrid()
+        openBore = _cylinderField()[0] > 0
+        plain = BurnbackGrid.fromMask(openBore, grid.valid[0], voxel)
+        change = float(grid.slabBurnArea().sum() - plain.slabBurnArea().sum())
+        # The cap trades the bore wall it covers for the disc of the bore's cross section; the wall is the larger of the two
+        expected = np.pi * _GRID_BORE ** 2 - 2 * np.pi * _GRID_BORE * _CAP_SLICES * voxel
+        self.assertAlmostEqual((change - expected) / (np.pi * _GRID_BORE ** 2), 0.0, delta=0.35)
+
+    def test_the_steady_pressure_follows_the_burning_area_with_a_cap_in_the_flow(self):
+        grid, _ = _blindBoreGrid()
+        props = _flowProperties()
+        result = runBurn(grid, props, throatDiameter=0.0064, tMax=0.01, pCutoff=0.0)
+        self.assertTrue(np.all(np.isfinite(result.headPressure)))
+        self.assertTrue(np.all(np.isfinite(result.aftPressure)))
+        g = props.gamma
+        cStar = np.sqrt(props.rSpecific * props.tFlame) / (np.sqrt(g) * (2 / (g + 1)) ** ((g + 1) / (2 * (g - 1))))
+        kn = grid.slabBurnArea().sum() / (np.pi / 4 * 0.0064 ** 2)
+        expected = (props.rhoPropellant * _A * cStar * kn) ** (1 / (1 - _N_EXP))
+        self.assertAlmostEqual(result.aftPressure[0] / expected, 1.0, delta=0.02)
+
+    def test_the_whole_burn_stays_finite_as_the_cap_burns_away(self):
+        grid, _ = _blindBoreGrid()
+        result = runBurn(grid, _flowProperties(), throatDiameter=0.0064, tMax=0.5, pCutoff=0.0)
+        self.assertGreater(result.time[-1], 0.2)
+        for series in (result.headPressure, result.aftPressure, result.massFlow, result.peakVelocity):
+            self.assertTrue(np.all(np.isfinite(series)))
 
 
 class TestFlowGrid(unittest.TestCase):

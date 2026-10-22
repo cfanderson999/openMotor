@@ -27,7 +27,10 @@ INITIAL_TEMPERATURE = 293.0
 class BurnStep:
     """What a model reports after a step: one entry per grain unless noted. `machNumber` is None when the model has none
     of its own and the loop derives it from the mass flux. `coreProfiles` maps a grain index to the `CoreProfile` of that
-    grain's bore, and is None when the model has none of its own."""
+    grain's bore, and is None when the model has none of its own. `pressure` is the chamber pressure at the head end,
+    where a transducer reads it. `nozzlePressure` is the pressure at the nozzle entrance for a model that solves the
+    pressure along the bore, which falls below the head-end pressure when the bore flows fast; thrust, exit pressure and
+    throat erosion follow it. It is None when the model has a single chamber pressure."""
     regression: List[float]
     web: List[float]
     volumeLoading: float
@@ -38,6 +41,7 @@ class BurnStep:
     pressure: float
     machNumber: Optional[List[float]] = None
     coreProfiles: Optional[dict] = None
+    nozzlePressure: Optional[float] = None
 
 
 class SteadyBurn:
@@ -198,7 +202,7 @@ class ErosiveBurn:
             regression=[float(v) for v in regression], web=[float(v) for v in web],
             volumeLoading=float(100 * volume.sum() / self.motorVolume), mass=[float(v) for v in volume * self.density],
             massFlow=[0.0] * count, massFlux=[0.0] * count, kn=self.initialKn, pressure=self.initialPressure,
-            coreProfiles=self._coreProfiles(web, 0.0, self._startingFlow()),
+            coreProfiles=self._coreProfiles(web, 0.0, self._startingFlow()), nozzlePressure=self.initialPressure,
         )
 
     def _startingFlow(self):
@@ -219,6 +223,7 @@ class ErosiveBurn:
         slices = np.arange(grid.phi.shape[0])
         atSlices = lambda perCell: np.interp(slices * grid.voxel, flowGrid.centers, perCell)
         regression = np.interp(slices, np.arange(grid.nSlabs) + 0.5, grid.slabRegression)
+        from .srm1d.burnback import MIN_PORT_AREA
         aPort, _, burnLength = sim.flowArrays()
         edges = np.arange(flowGrid.cells + 1) * flowGrid.length
         burnArea = np.interp(slices * grid.voxel, edges, np.concatenate([[0.0], np.cumsum(burnLength * flowGrid.length)]))
@@ -236,7 +241,7 @@ class ErosiveBurn:
         profiles = {}
         for gid, index in enumerate(self.sliceIndex):
             if web[gid] > floor:
-                hasPort = port[index] > 0
+                hasPort = port[index] > MIN_PORT_AREA  # a slice of solid propellant has no bore, only the solver's floor
                 profiles[gid] = CoreProfile(
                     regression=regression[index],
                     metrics={key: np.where(hasPort, perSlice[index], np.nan) for key, perSlice in values.items()},
@@ -257,6 +262,7 @@ class ErosiveBurn:
             massFlux=self._largestPerGrain(sim.massFluxCells()),
             kn=sim.burnArea() / nozzle.getThroatArea(dThroat), pressure=float(sim.pressure[0]),
             machNumber=self._largestPerGrain(sim.machCells()), coreProfiles=self._coreProfiles(web, dThroat, flow),
+            nozzlePressure=float(sim.pressure[-1]),
         )
 
     def progress(self, step):

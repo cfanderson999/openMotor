@@ -263,7 +263,7 @@ class Window(QMainWindow):
         if len(ind) > 0:
             gid = ind[0].row()
             if gid < len(cm.grains):
-                self.ui.motorEditor.loadObject(cm.grains[gid])
+                self.ui.motorEditor.loadObject(cm.grains[gid], cm.grains[gid].getHiddenProperties(cm.config.simulatesIn3D()))
             elif gid == len(cm.grains):
                 self.ui.motorEditor.loadObject(cm.nozzle)
             else:
@@ -301,7 +301,7 @@ class Window(QMainWindow):
         self.app.fileManager.addNewMotorHistory(cm)
         self.updateGrainTable()
         self.ui.tableWidgetGrainList.selectRow(len(cm.grains) - 1)
-        self.ui.motorEditor.loadObject(cm.grains[-1])
+        self.ui.motorEditor.loadObject(cm.grains[-1], cm.grains[-1].getHiddenProperties(cm.config.simulatesIn3D()))
         self.checkGrainSelection()
         self.toggleGrainButtons(False)
 
@@ -342,7 +342,7 @@ class Window(QMainWindow):
         self.ui.labelDeliveredThrustCoefficient.setText(self.formatMotorStat(simResult.getAdjustedThrustCoefficient(), ''))
 
     def getQuickResults(self, motor):
-        has3d = any(isinstance(g, Fmm3DGrain) for g in motor.grains)
+        has3d = any(isinstance(g, Fmm3DGrain) for g in motor.grains) or motor.hasEndburnerSections()
         self._quickResultsStopped = False
         if has3d:
             self._fmmProgDialog.show()
@@ -350,15 +350,17 @@ class Window(QMainWindow):
             self._fmmProgDialog.setIndeterminate(True)
 
         def _worker():
+            # A grain with an endburner section only exists in 3D, so the quick results and the preview use its 3D version
+            shown = motor.withEndburnerGrainsConverted() if motor.hasEndburnerSections() else motor
             if has3d:
                 def _status(text):
                     self._fmmSetupStage.emit(text)
                 def _cancelCheck():
                     return self._quickResultsStopped
-                results = motor.getQuickResults(cancelCheck=_cancelCheck, statusCb=_status)
+                results = shown.getQuickResults(cancelCheck=_cancelCheck, statusCb=_status)
             else:
-                results = motor.getQuickResults()
-            self._quick3DPreviewReady.emit(motor)
+                results = shown.getQuickResults()
+            self._quick3DPreviewReady.emit(shown)
             self._quickResultsReady.emit(results)
 
         Thread(target=_worker).start()

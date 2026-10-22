@@ -48,7 +48,7 @@ class Finocyl(FmmGrain):
             self.coreMap[np.logical_and(vect, ends)] = invertedFins
 
     def getDetailsString(self, lengthUnit='m'):
-        return 'Length: {}, Core: {}, Fins: {}'.format(self.props['length'].dispFormat(lengthUnit),
+        return 'Length: {}, Core: {}, Fins: {}'.format(self.getLengthString(lengthUnit),
                                                        self.props['coreDiameter'].dispFormat(lengthUnit),
                                                        self.props['numFins'].getValue())
 
