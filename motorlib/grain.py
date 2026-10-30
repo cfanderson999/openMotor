@@ -16,6 +16,7 @@ from typing import Tuple, List, Union
 import numpy as np
 import skfmm
 from scipy import interpolate, ndimage
+from scipy.integrate import trapezoid
 from scipy.signal import savgol_filter
 from skimage import measure
 
@@ -862,7 +863,7 @@ class Fmm3DGrain(Grain):
             area = savgol_filter(area, 5, 3)
         area = np.maximum(area, 0.0)
         toMeters = 0.5 * self.props['diameter'].getValue()
-        integral = np.trapz(area, grid * toMeters)
+        integral = trapezoid(area, grid * toMeters)
         shortfall = (propellantVolume - integral) / propellantVolume
         if not -0.12 < shortfall < 0.12:
             return None
