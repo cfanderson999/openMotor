@@ -26,6 +26,7 @@ print(f"{'reg(mm)':>8} {'rawVol':>12} {'smthVol':>12} {'rawDvdr':>10} {'smthDvdr
 step_mm = 0.5
 n_steps = int(grain.wallWeb * 1000 / step_mm) + 1
 prev_raw_vol = None
+prev_smth_vol = None
 
 for i in range(n_steps):
     reg = i * step_mm / 1000.0
